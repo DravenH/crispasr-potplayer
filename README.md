@@ -32,10 +32,6 @@ crispasr -m <model.gguf> -f <audio> -l ja --vad -osrt -of <out>\<base> --split-o
 
 并把产出的 SRT 放到 PotPlayer 期望的位置（`<输出目录>\<音频同名>.srt`）。
 
-> ⚠️ **不要修改 PotPlayer64.dll 给引擎"改名"**——PotPlayer 启动时校验自身 DLL 完整性，
-> 哪怕只改一个字符串也会弹 "PotPlayer64.dll is modified or hacked" 拒绝启动。
-> 下拉里的名字只能是 `Whisper-Faster`，认名字即可。
-
 > ⚠️ "声音生成字幕**（实时）**"菜单不走任何 exe——它在进程内直接调用
 > `Module\Whisper\whisper64.dll`（whisper.cpp C ABI），无法挂接 CrispASR。
 > 但离线模式在 GPU 上是 200×+ 实时，等一次全片转录只要几十秒，实际不缺"实时"。
@@ -61,7 +57,10 @@ crispasr -m <model.gguf> -f <audio> -l ja --vad -osrt -of <out>\<base> --split-o
 
 ## 安装
 
-**方式一：图形安装器（推荐）** —— 双击 `bin\CrispASR-PotPlayer-Setup.exe`：
+**方式一：图形安装器（推荐）** —— 下载 **`CrispASR-PotPlayer-Setup.exe`**
+（[Releases 页](https://github.com/DravenH/crispasr-potplayer/releases/latest)，
+国内直连慢时可走 `https://gh-proxy.org/https://github.com/DravenH/crispasr-potplayer/releases/latest/download/CrispASR-PotPlayer-Setup.exe`）
+后双击运行；clone 本仓库的话直接双击 `bin\CrispASR-PotPlayer-Setup.exe` 也一样：
 
 - 自动扫描 PotPlayer 安装目录（注册表卸载项 32/64 位视图 + 常见安装路径，
   认 32/64 位全部四种主程序名），找不到时弹出文件夹选择框
