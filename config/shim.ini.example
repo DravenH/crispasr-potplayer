@@ -1,0 +1,30 @@
+; ============ CrispASR PotPlayer 垫片配置 ============
+; 将本文件复制为 shim.ini，放在 whisper-faster.exe 同目录，并按实际情况修改路径。
+; 若组件按安装器布局摆放（同目录 CrispASR\ 与 CrispASR\models\），
+; 也可以不放 shim.ini —— 垫片会自动探测；把某项留空同样表示"自动探测"。
+
+; crispasr.exe 的完整路径。
+; 下载：https://github.com/CrispStrobe/CrispASR/releases （GPU 机建议 CUDA 版；
+; RTX 50 系等 sm_120 新卡需 cuda13 构建）
+crispasr=C:\tools\CrispASR\crispasr.exe
+
+; 语音模型 GGUF 路径。日语推荐：
+; https://hf-mirror.com/cstr/parakeet-tdt-0.6b-ja-GGUF （f16 / q8_0 皆可）
+model=C:\tools\CrispASR\models\parakeet-tdt-0.6b-ja.gguf
+
+; 识别语言（ISO 码）。parakeet-tdt-0.6b-ja 仅支持日语，保持 ja。
+language=ja
+
+; 追加给 crispasr 的额外参数（可选）。
+; --split-on-punct 按标点断句；--flush-after 1 使字幕边跑边写出（进度可见）。
+extra=--split-on-punct --flush-after 1
+
+; 1 = 强制 CPU 运行（默认 0，用 GPU）
+nogpu=0
+
+; 1 = 在 %TEMP%\crispasr-xxl-shim.log 追加运行日志（排错用）
+log=1
+
+; 可选：ffmpeg 所在目录。垫片会把它注入 crispasr 子进程 PATH，
+; 供 crispasr 解码非常规音频时兜底。留空则跳过。
+ffmpeg_dir=

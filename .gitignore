@@ -1,0 +1,6 @@
+*.log
+*.srt
+*.wav
+*.gguf
+Thumbs.db
+Desktop.ini
