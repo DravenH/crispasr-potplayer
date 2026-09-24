@@ -1,13 +1,18 @@
 // Component downloader for the CrispASR-PotPlayer installer (see Installer.cs).
 // Downloads crispasr windows zip (build chosen by GPU), Japanese GGUF model and
 // optionally ffmpeg into <PotPlayer>\Engine\Whisper-Faster\, with a progress
-// window, proxy fallback retries and sha-free but size-checked writes.
+// window, proxy fallback retries and SHA-256 verification of pinned assets.
+// Default source is a known-good release tag (PinnedTag) whose asset hashes are
+// compiled in; only an explicit /version: or the "check for updates" checkbox makes
+// the installer follow the newest release, in which case no hash can be verified.
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.IO.Compression;
 using System.Net;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -23,7 +28,38 @@ static class Dl
     const string ModelHost2 = "https://huggingface.co/";
     const string FfmpegUrl = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip";
 
-    public static void Run(string engDir, string build, string model, bool wantFfmpeg, string only)
+    // Upstream release the maintainer verified by hand; every asset below is
+    // sha256-checked against this tag. Bump PinnedTag + refresh the table only
+    // after re-testing a newer release.
+    public const string PinnedTag = "v0.8.36";
+
+    static readonly Dictionary<string, string> AssetSha = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+    {
+        { "crispasr-windows-x86_64-cpu.zip", "1d8c853d102671f4036ccf4da8573a6d9ed3d45ae4530aa07573760a4bc93dc1" },
+        { "crispasr-windows-x86_64-cpu-legacy.zip", "fb0b8555343daf434533e53d4eca2d10726f991f5014008e50af64607f184bd1" },
+        { "crispasr-windows-x86_64-vulkan.zip", "659e6cc1d3d0c7d65e1ce2df61efd7295c5b017e8a95c4d340c20ba70793d9cc" },
+        { "crispasr-windows-x86_64-cuda13.zip", "d81795954af9b9f08ccd43ab875e6db8d538881fef3b910e7b6bddd07617a98f" },
+        { "crispasr-windows-x86_64-cuda.zip", "4d14ce34cbc089259e897bed369214f6f920efa31e3236845bb6c7464ed7fba0" },
+    };
+
+    // HF publishes these LFS oids (== sha256 of the served file) in its tree API.
+    static readonly Dictionary<string, string> ModelSha = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+    {
+        { "parakeet-tdt-0.6b-ja-q8_0.gguf", "5a61e6c7d956c3c72a76fafcd798cac0c9ea66d0e29b3910cd04865a1e42cc17" },
+        { "parakeet-tdt-0.6b-ja.gguf", "374eb0132eebaec4df77a9631cbbeb03790be48a4a517f6cc8e8bdb38fe9a584" },
+        { "parakeet-tdt-0.6b-ja-q4_k.gguf", "9a9bdfec5a1f119983a00367d33fb310759d67619309f02500f649c5328ab825" },
+    };
+
+    static readonly Dictionary<string, long> ModelSize = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase)
+    {
+        { "parakeet-tdt-0.6b-ja-q8_0.gguf", 673554880L },
+        { "parakeet-tdt-0.6b-ja.gguf", 1246932800L },
+        { "parakeet-tdt-0.6b-ja-q4_k.gguf", 405502208L },
+    };
+
+    // version: null -> PinnedTag (hash-verified), "latest" -> newest release,
+    // any other value -> that exact upstream tag (verified only when it is PinnedTag).
+    public static void Run(string engDir, string build, string model, bool wantFfmpeg, string only, string version)
     {
         bool wantCrisp = only == null || only.Contains("crisp");
         bool wantModel = only == null || only.Contains("model");
@@ -41,20 +77,30 @@ static class Dl
             if (wantCrisp)
             {
                 string asset = "crispasr-windows-x86_64-" + build + ".zip";
+                string sha;
+                string url = FindAssetUrl(asset, version, out sha);
                 dlg.SetInfo("查询 CrispASR " + build + " 版下载源…");
-                string url = FindAssetUrl(asset);
+                if (sha == null) Log("WARNING: " + url + " is not hash-pinned (base " + PinnedTag + ")");
                 Log("asset url: " + url);
                 string zip = Path.Combine(tmp, asset);
-                Fetch(wc, dlg, url, zip, GhProxy);
+                string dlUrl = url;
+                CheckSha(wc, dlg, delegate { Fetch(wc, dlg, dlUrl, zip, GhProxy); }, zip, sha);
                 dlg.SetInfo("解压 CrispASR…");
                 if (!headless) Application.DoEvents();
                 string exeRoot = Path.Combine(engDir, "CrispASR");
+                // models/ lives inside CrispASR but is ours to keep: move it aside
+                // so re-installing the runtime never throws away a 642 MB download
+                string models = Path.Combine(exeRoot, "models");
+                string keep = Path.Combine(tmp, "keepmodels");
+                bool kept = false;
+                if (Directory.Exists(models)) { MoveDir(models, keep); kept = true; }
                 if (Directory.Exists(exeRoot)) Directory.Delete(exeRoot, true);
                 string unz = Path.Combine(tmp, "unz");
                 ZipFile.ExtractToDirectory(zip, unz);
                 string found = FindCrispDir(unz);
                 if (found == null) throw new InvalidOperationException("zip 内未找到 crispasr.exe");
                 MoveDir(found, exeRoot);
+                if (kept) MoveDir(keep, models);
                 File.Delete(zip);
             }
 
@@ -63,16 +109,35 @@ static class Dl
                 string mdir = Path.Combine(Path.Combine(engDir, "CrispASR"), "models");
                 Directory.CreateDirectory(mdir);
                 string mfile = Path.Combine(mdir, model);
-                if (File.Exists(mfile) && new FileInfo(mfile).Length > 100L * 1024 * 1024)
-                    dlg.SetInfo("模型已存在，跳过下载");
+                string msha; ModelSha.TryGetValue(model, out msha);
+                long msize; ModelSize.TryGetValue(model, out msize);
+                bool have = false;
+                if (File.Exists(mfile))
+                {
+                    have = msize > 0 ? new FileInfo(mfile).Length == msize
+                                     : new FileInfo(mfile).Length > 100L * 1024 * 1024;
+                    if (have)
+                    {
+                        dlg.SetInfo("校验已有模型 " + model + " …");
+                        have = Verify(mfile, msha);   // unknown model name -> no hash -> keep it
+                        if (!have) dlg.SetInfo("已有模型校验不过，重新下载…");
+                    }
+                }
+                if (have)
+                    dlg.SetInfo("模型已存在且校验通过，跳过下载");
                 else
-                    FetchAny(wc, dlg, new string[] {
+                {
+                    string[] murls = new string[] {
                         ModelHost1 + ModelRepo + "/resolve/main/" + model,
-                        ModelHost2 + ModelRepo + "/resolve/main/" + model }, mfile);
+                        ModelHost2 + ModelRepo + "/resolve/main/" + model };
+                    CheckSha(wc, dlg, delegate { FetchAny(wc, dlg, murls, mfile); }, mfile, msha);
+                }
             }
 
             if (wantFf)
             {
+                // gyan.dev's "release-essentials" is a rolling URL, so no hash can be
+                // pinned; the zip is still size-checked and we only copy the two exes out.
                 string zip = Path.Combine(tmp, "ffmpeg.zip");
                 Fetch(wc, dlg, FfmpegUrl, zip, GhProxy);
                 dlg.SetInfo("解压 ffmpeg…");
@@ -108,8 +173,37 @@ static class Dl
         }
     }
 
+    // null -> PinnedTag + compiled-in sha256; "latest" -> newest release that has
+    // the asset (API scan, unverified); any other value -> that exact upstream tag
+    // (unverified unless it happens to be PinnedTag).
+    static string FindAssetUrl(string asset, string version, out string sha)
+    {
+        sha = null;
+        if (version == null || version.Equals(PinnedTag, StringComparison.OrdinalIgnoreCase))
+        {
+            string pinned = ShaOf(asset);
+            if (pinned != null)
+            {
+                sha = pinned;
+                return AssetPrefix + PinnedTag + "/" + asset;
+            }
+            Log("no pinned hash for " + asset + ", resolving newest release instead");
+            version = "latest";
+        }
+        if (version.Equals("latest", StringComparison.OrdinalIgnoreCase))
+        {
+            string url = NewestAssetUrl(asset);
+            if (url == null) throw new InvalidOperationException("上游 releases 中找不到资产：" + asset);
+            if (url.Contains("/" + PinnedTag + "/")) sha = ShaOf(asset);
+            return url;
+        }
+        if (!Regex.IsMatch(version, "^[vV]?[0-9]+\\.[0-9]+[0-9A-Za-z.+-]*$"))
+            throw new InvalidOperationException("非法的版本号（应为上游 tag，如 v0.8.36）：" + version);
+        return AssetPrefix + version.Trim('/') + "/" + asset;
+    }
+
     // newest release containing the asset; regex over API JSON (no JSON lib in csc)
-    static string FindAssetUrl(string asset)
+    static string NewestAssetUrl(string asset)
     {
         try
         {
@@ -118,13 +212,60 @@ static class Dl
                 string json = FetchString(wc, ReleasesApi);
                 var m = Regex.Match(json, "\"browser_download_url\":\\s*\"([^\"]*\\/" + Regex.Escape(asset) + ")\"");
                 if (m.Success) return m.Groups[1].Value;
-                Log("asset not in recent releases, using fallback tag: " + asset);
+                Log("asset not in recent releases: " + asset);
             }
         }
         catch (Exception e) { Log("release api failed: " + e.Message); }
-        // v0.8.36 ships cpu/cpu-legacy/vulkan; windows cuda zips last verified in v0.8.35
-        string tag = (asset.Contains("-cuda13.") || asset.EndsWith("-cuda.zip")) ? "v0.8.35" : "v0.8.36";
-        return AssetPrefix + tag + "/" + asset;
+        return null;
+    }
+
+    static string ShaOf(string asset)
+    {
+        string s;
+        return AssetSha.TryGetValue(asset, out s) ? s : null;
+    }
+
+    static string Sha256File(string path)
+    {
+        using (var hash = SHA256.Create())
+        using (var f = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+        {
+            var buf = new byte[1048576];
+            int n;
+            while ((n = f.Read(buf, 0, buf.Length)) > 0)
+                hash.TransformBlock(buf, 0, n, null, 0);
+            hash.TransformFinalBlock(new byte[0], 0, 0);
+            var sb = new StringBuilder(64);
+            foreach (var b in hash.Hash) sb.Append(b.ToString("x2"));
+            return sb.ToString();
+        }
+    }
+
+    static bool Verify(string file, string sha)
+    {
+        if (string.IsNullOrEmpty(sha)) return true;
+        string got = Sha256File(file);
+        bool ok = got.Equals(sha, StringComparison.OrdinalIgnoreCase);
+        Log((ok ? "sha ok   " : "sha FAIL ") + Path.GetFileName(file) + " " + got);
+        return ok;
+    }
+
+    // download, then refuse to install anything whose hash doesn't match; a
+    // mismatch (broken mirror, truncated transfer) gets exactly one retry.
+    static void CheckSha(WebClient wc, Dlg dlg, Action download, string file, string sha)
+    {
+        download();
+        if (string.IsNullOrEmpty(sha)) return;
+        dlg.SetInfo("校验 " + Path.GetFileName(file) + " 的 SHA-256…");
+        if (Verify(file, sha)) return;
+        Log("sha mismatch, retrying: " + file);
+        dlg.SetInfo("SHA-256 校验失败，重新下载…");
+        try { File.Delete(file); } catch { }
+        download();
+        if (!Verify(file, sha))
+            throw new InvalidOperationException("SHA-256 校验失败，文件可能损坏或被篡改：\n"
+                + Path.GetFileName(file) + "\n期望：" + sha + "\n实际：" + Sha256File(file)
+                + "\n若上游确实更新了该文件，请改用手动下载（见 README）或调整 /version: 后再试。");
     }
 
     static Dl()

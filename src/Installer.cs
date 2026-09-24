@@ -2,7 +2,10 @@
 // template) into <PotPlayer>\Engine\Whisper-Faster. Supports 32/64-bit PotPlayer.
 // Optionally auto-downloads runtime components (see Download.cs) after a version
 // picker dialog with GPU-aware hints.
-// GUI double-click flow, plus silent CLI:  Setup.exe ["X:\PotPlayer"] /quiet [/download]
+// GUI double-click flow, plus silent CLI:
+//   Setup.exe ["X:\PotPlayer"] /quiet [/download] [/build:cpu|cuda|cuda13|vulkan]
+//             [/model:f16] [/only:crisp,model,ffmpeg] [/version:v0.8.37|latest]
+// Downloads default to the hash-pinned release; /version: opts out of that pin.
 // Exit codes: 0 ok, 2 PotPlayer not found, 3 write failed, 4 download failed.
 using System;
 using System.Collections.Generic;
@@ -27,7 +30,7 @@ static class Installer
     {
         try { Application.EnableVisualStyles(); } catch { }
 
-        string dir = null, buildOverride = null, modelOverride = null, only = null;
+        string dir = null, buildOverride = null, modelOverride = null, only = null, versionOverride = null;
         bool quiet = false, downloadFlag = false;
         foreach (var a in args)
         {
@@ -36,6 +39,7 @@ static class Installer
             else if (a.StartsWith("/build:", StringComparison.OrdinalIgnoreCase)) buildOverride = a.Substring(7).ToLowerInvariant();
             else if (a.StartsWith("/model:", StringComparison.OrdinalIgnoreCase)) modelOverride = a.Substring(7).ToLowerInvariant();
             else if (a.StartsWith("/only:", StringComparison.OrdinalIgnoreCase)) only = a.Substring(6).ToLowerInvariant();
+            else if (a.StartsWith("/version:", StringComparison.OrdinalIgnoreCase)) versionOverride = a.Substring(9).Trim().Trim('"');
             else if (!a.StartsWith("/")) dir = a.Trim('"');
         }
 
@@ -89,10 +93,11 @@ static class Installer
 
             if (wantDl)
             {
-                string build, model;
+                string build, model, version;
                 bool ff;
-                PickComponents(quiet, buildOverride, modelOverride, only, out build, out model, out ff);
-                Dl.Run(engDir, build, model, ff, only);
+                PickComponents(quiet, buildOverride, modelOverride, only, versionOverride,
+                               out build, out model, out ff, out version);
+                Dl.Run(engDir, build, model, ff, only, version);
                 UpdateIniAfterDownload(iniPath, engDir);
                 didDownload = true;
             }
@@ -418,7 +423,8 @@ static class Installer
     }
 
     static void PickComponents(bool quiet, string buildOverride, string modelOverride, string only,
-                               out string build, out string model, out bool ff)
+                               string versionOverride,
+                               out string build, out string model, out bool ff, out string version)
     {
         double cc;
         string gpuDesc = DetectGpu(out cc);
@@ -427,6 +433,7 @@ static class Installer
         build = !string.IsNullOrEmpty(buildOverride) && IsValidBuild(buildOverride) ? buildOverride : suggest;
         model = modelOverride == "f16" ? ModelF16 : ModelQ8;
         ff = only != null && only.Contains("ffmpeg");
+        version = string.IsNullOrEmpty(versionOverride) ? null : versionOverride;
         // scripted modes (quiet, or explicit /build:/only:) skip the dialog
         if (quiet || only != null || buildOverride != null) return;
 
@@ -436,6 +443,8 @@ static class Installer
             build = dlg.SelectedBuild;
             model = dlg.SelectedModel;
             ff = dlg.Ffmpeg;
+            // an explicit /version: on the command line outranks the checkbox
+            if (string.IsNullOrEmpty(version)) version = dlg.Latest ? "latest" : null;
         }
     }
 
@@ -443,9 +452,9 @@ static class Installer
     {
         Dictionary<string, RadioButton> buildRadios = new Dictionary<string, RadioButton>();
         RadioButton q8, f16;
-        CheckBox ffBox;
+        CheckBox ffBox, latestBox;
         public string SelectedBuild, SelectedModel;
-        public bool Ffmpeg;
+        public bool Ffmpeg, Latest;
 
         public PickDlg(string gpuDesc, string suggestBuild, string suggestModel, bool suggestFf)
         {
@@ -453,7 +462,7 @@ static class Installer
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false; MinimizeBox = false;
             StartPosition = FormStartPosition.CenterScreen;
-            ClientSize = new Size(560, 432);
+            ClientSize = new Size(560, 456);
             Font = new Font("Microsoft YaHei UI", 9f);
 
             var gpu = new Label();
@@ -476,9 +485,15 @@ static class Installer
             tip1.ForeColor = Color.Gray;
             gb1.Controls.Add(tip1);
 
+            latestBox = new CheckBox();
+            latestBox.Text = "检查最新版（默认只装已验证的 " + Dl.PinnedTag + " + SHA-256，勾选则不校验）";
+            latestBox.SetBounds(14, 230, 536, 20);
+            latestBox.CheckedChanged += delegate { Latest = latestBox.Checked; };
+            Controls.Add(latestBox);
+
             var gb2 = new GroupBox();
             gb2.Text = "日语模型 parakeet-tdt-0.6b-ja（GGUF）";
-            gb2.SetBounds(12, 232, 536, 88);
+            gb2.SetBounds(12, 256, 536, 88);
             Controls.Add(gb2);
             q8 = new RadioButton();
             q8.Text = "q8_0（≈642 MB，推荐）— 精度与 f16 几乎无差别，加载更快";
@@ -490,12 +505,12 @@ static class Installer
 
             ffBox = new CheckBox();
             ffBox.Text = "下载 ffmpeg（可选 ≈115 MB）— crispasr 内置解码失败时的兜底解码器；仅 PotPlayer 内用可不装";
-            ffBox.SetBounds(14, 328, 536, 22);
+            ffBox.SetBounds(14, 352, 536, 22);
             Controls.Add(ffBox);
 
             var ok = new Button();
             ok.Text = "开始下载";
-            ok.SetBounds(330, 388, 100, 32);
+            ok.SetBounds(330, 412, 100, 32);
             ok.DialogResult = DialogResult.OK;
             var cancel = new Button();
             cancel.Text = "跳过下载";
@@ -511,6 +526,7 @@ static class Installer
             ffBox.Checked = suggestFf;
 
             SelectedBuild = suggestBuild; SelectedModel = suggestModel; Ffmpeg = suggestFf;
+            Latest = false;
         }
 
         void AddBuild(GroupBox gb, string id, string text, int y)

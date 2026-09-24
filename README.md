@@ -84,7 +84,10 @@ crispasr -m <model.gguf> -f <audio> -l ja --vad -osrt -of <out>\<base> --split-o
   | CrispASR CPU 版（含 legacy） | 无独显；legacy 供不支持 AVX2 的老 CPU |
   | 模型 q8_0 ≈642MB（推荐）/ f16 ≈1190MB | 精度几乎无差别，q8_0 加载更快 |
   | ffmpeg ≈115MB（可选勾选） | crispasr 内置解码失败时的兜底解码器；仅 PotPlayer 内用可不装 |
-  下载源自动选最新 release（直连失败走 `gh-proxy.org`；模型走 hf-mirror → huggingface 回退），
+  默认**只下载已验证固定的上游版本 v0.8.36**，下载完逐个核对内置 SHA-256
+  （不匹配会重试一次后报错，绝不解压安装），**不会自动跟随“最新版”**；
+  确需升级时在弹框勾选“检查最新版”（此路径不校验哈希）或用 `/version:<tag>` 指定；
+  直连失败走 `gh-proxy.org`，模型走 hf-mirror → huggingface 回退，
   落盘到 `<PotPlayer>\Engine\Whisper-Faster\CrispASR\`，并自动写入 `shim.ini`
 - PotPlayer 装在 `Program Files` 等受保护目录时，请右键 → **以管理员身份运行**
 - 也支持静默安装（脚本/无人值守）：
@@ -93,6 +96,7 @@ crispasr -m <model.gguf> -f <audio> -l ja --vad -osrt -of <out>\<base> --split-o
   CrispASR-PotPlayer-Setup.exe /quiet "X:\Path\To\PotPlayer"                :: 只装垫片
   CrispASR-PotPlayer-Setup.exe /quiet "X:\..." /download                     :: 按显卡自动选版下载组件
   ... /download /build:cuda13 /model:f16                                     :: 指定版本（可加 /only:crisp+model）
+  ... /download /version:latest                                              :: 显式跟最新版（跳过哈希校验）
   ```
 
   退出码：0 成功 / 2 未找到 PotPlayer / 3 写入失败 / 4 下载失败
@@ -106,6 +110,34 @@ crispasr -m <model.gguf> -f <audio> -l ja --vad -osrt -of <out>\<base> --split-o
 32 位与 64 位 PotPlayer 通用（垫片是 AnyCPU 的 .NET 4 程序）；若你已在用正版
 whisper-faster / faster-whisper-xxl 引擎，互不冲突：本项目只占
 `Engine\Whisper-Faster` 目录，原版 XXL 槽位不受影响。
+
+## 版本与校验值
+
+安装器内置了下面这张表（`src\Download.cs` 的 `PinnedTag` / `AssetSha` / `ModelSha`）：
+默认只从 **v0.8.36** 下载，落盘后按 SHA-256 校验，不匹配就重试一次并报错终止，
+**不会解压安装未通过校验的文件**。模型值取自 HuggingFace 的 LFS oid（即文件本体 sha256），
+镜像站 hf-mirror 提供的是同一份字节，因此同样适用。
+
+```
+crispasr-windows-x86_64-cpu.zip         1d8c853d102671f4036ccf4da8573a6d9ed3d45ae4530aa07573760a4bc93dc1
+crispasr-windows-x86_64-cpu-legacy.zip  fb0b8555343daf434533e53d4eca2d10726f991f5014008e50af64607f184bd1
+crispasr-windows-x86_64-vulkan.zip      659e6cc1d3d0c7d65e1ce2df61efd7295c5b017e8a95c4d340c20ba70793d9cc
+crispasr-windows-x86_64-cuda13.zip      d81795954af9b9f08ccd43ab875e6db8d538881fef3b910e7b6bddd07617a98f
+crispasr-windows-x86_64-cuda.zip        4d14ce34cbc089259e897bed369214f6f920efa31e3236845bb6c7464ed7fba0
+parakeet-tdt-0.6b-ja-q8_0.gguf          5a61e6c7d956c3c72a76fafcd798cac0c9ea66d0e29b3910cd04865a1e42cc17
+parakeet-tdt-0.6b-ja.gguf               374eb0132eebaec4df77a9631cbbeb03790be48a4a517f6cc8e8bdb38fe9a584
+parakeet-tdt-0.6b-ja-q4_k.gguf          9a9bdfec5a1f119983a00367d33fb310759d67619309f02500f649c5328ab825
+```
+
+两点已知例外：
+
+- **ffmpeg 不校验**：gyan.dev 的 `ffmpeg-release-essentials.zip` 是滚动地址，
+  内容随版本变化，无法固定哈希；安装器只取其中的 `ffmpeg.exe` / `ffprobe.exe`。
+- **升级路径不校验**：勾选"检查最新版"或传 `/version:<其它 tag>` 时，
+  下载的是本表之外的文件，自然无哈希可比。
+
+维护者升级流程：换 `build` 实测新版可用 → 更新 `PinnedTag` 与 `AssetSha`
+（`sha256sum` 或 `Get-FileHash` 自行取值）→ 重新编译发布。
 
 ## 使用
 
@@ -199,7 +231,9 @@ CC-BY-4.0 要求再分发模型时保留署名——你若把模型文件复制�
 
 - 转录他人享有版权的音视频（包括番剧、电影、播客）是否合规，**由使用者自行负责**；
   本项目只提供技术链路，不构成任何版权方面的建议或授权。
-- 安装器默认下载上游**最新发布版**且不校验哈希，若你介意供应链风险，
-  可自行下载指定版本、核对哈希后用 [方式二](#安装) 手动部署。
+- 安装器默认只下载**已验证固定的上游版本**并逐个核对内置 SHA-256（见
+  [版本与校验值](#版本与校验值)），不会静默跟随最新版；
+  勾选"检查最新版"或用 `/version:latest` 时不做哈希校验，请自行确认来源可信。
+  若你介意供应链风险，也可用 [方式二](#安装) 手动下载、自行核对哈希后部署。
 - 软件按"现状"提供，不含任何明示或暗示的保证；因使用本项目导致的数据丢失、
   系统问题等后果，作者不承担责任。
