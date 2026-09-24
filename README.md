@@ -72,9 +72,15 @@ crispasr -m <model.gguf> -f <audio> -l ja --vad -osrt -of <out>\<base> --split-o
 - 自动扫描 PotPlayer 安装目录（注册表卸载项 32/64 位视图 + 常见安装路径，
   认 32/64 位全部四种主程序名），找不到时弹出文件夹选择框
 - 把垫片写入 `<PotPlayer>\Engine\Whisper-Faster\`：
-  若该目录已有**官方 whisper-faster 引擎**（安装器通过 exe 内容识别，非我们发的垫片），
+  若该目录已有**不是本项目发布的引擎 exe**（官方 whisper-faster / faster-whisper-xxl 等），
   自动改名为 `whisper-faster.real.exe` 备份、绝不删除——想换回官方引擎时改回原名即可；
-  已装有自己配置过的旧版垫片时**覆盖 exe、保留你的 shim.ini**（其余情况 shim.ini 重新生成）
+  同名备份已存在时带时间戳（`whisper-faster.real-20260924-155339.exe`），不会覆盖前一份；
+  完成弹窗会报告被备份的文件名、字节数与 SHA-256（前 16 位），便于你回查
+  - 判定依据是"是否为我们发的那份"：与内置 exe 逐字节相同，或含本项目 shim 的
+    内部标记（同尺寸被改过的构建也会被识别为本项目的并直接覆盖）。
+    **不用哈希去匹配"官方版本"**——上游持续发新版、也没有稳定校验值可pin，
+    任何哈希表都会很快过期并误判；"不是我们的就备份"是唯一可判定的安全规则
+  - 已装有自己配置过的旧版垫片时**覆盖 exe、保留你的 shim.ini**（其余情况 shim.ini 重新生成）
 - 新生成的 `shim.ini` **按你选择的安装目录自动写好组件路径**（默认指向
   `Engine\Whisper-Faster\CrispASR\`），全程无需手动编辑配置文件
 - 未检测到 CrispASR 时可**自动下载全部组件**：安装器会用 `nvidia-smi` 读取显卡
@@ -234,12 +240,14 @@ src\build.bat
 
 仅需 .NET Framework 4.x（Win10/11 自带），无任何第三方依赖。
 一次产出两个文件：`bin\whisper-faster.exe`（垫片）与
-`bin\CrispASR-PotPlayer-Setup.exe`（安装器，垫片与 ini 模板以资源形式内嵌）。
+`bin\CrispASR-PotPlayer-Setup.exe`（安装器，垫片与 ini 模板以资源形式内嵌，
+安装器图标由 `assets\mkicon.ps1` 绘制的 `assets\setup.ico` 通过 `-win32icon` 封装）。
 `bin\` 内已附最新预编译产物。
 
 ## License
 
-本项目自身代码（`src\`、`config\`、`tools\`）采用 **MIT**，见 `LICENSE`。
+本项目自身代码（`src\`、`config\`、`tools\`）与 `assets\` 下的图标
+（由 `assets\mkicon.ps1` 纯代码绘制，无外部素材）采用 **MIT**，见 `LICENSE`。
 
 ## 第三方许可与致谢
 

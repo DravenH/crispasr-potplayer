@@ -86,59 +86,32 @@ static class Dl
         string tmp = Path.Combine(Path.GetTempPath(), "crispasr-dl-" + DateTime.Now.ToString("HHmmss"));
         Directory.CreateDirectory(tmp);
         var wc = NewClient();
+        var done = new List<string>();
         try
         {
             if (wantCrisp)
             {
-                string asset = "crispasr-windows-x86_64-" + build + ".zip";
-                string sha;
-                string url = FindAssetUrl(asset, version, out sha);
-                dlg.SetInfo("查询 CrispASR " + build + " 版下载源…");
-                if (sha == null) Log("WARNING: " + url + " is not hash-pinned (base " + PinnedTag + ")");
-                Log("asset url: " + url);
-                string zip = Path.Combine(tmp, asset);
-                string dlUrl = url;
-                CheckSha(wc, dlg, delegate { Fetch(wc, dlg, dlUrl, zip, GhProxy); }, zip, sha);
-                dlg.SetInfo("解压 CrispASR…");
-                if (!headless) Application.DoEvents();
-                string exeRoot = Path.Combine(engDir, "CrispASR");
-                // models/ lives inside CrispASR but is ours to keep: move it aside
-                // so re-installing the runtime never throws away a 642 MB download
-                string models = Path.Combine(exeRoot, "models");
-                string keep = Path.Combine(tmp, "keepmodels");
-                bool kept = false;
-                if (Directory.Exists(models)) { MoveDir(models, keep); kept = true; }
-                if (Directory.Exists(exeRoot)) Directory.Delete(exeRoot, true);
-                string unz = Path.Combine(tmp, "unz");
-                ZipFile.ExtractToDirectory(zip, unz);
-                string found = FindCrispDir(unz);
-                if (found == null) throw new InvalidOperationException("zip 内未找到 crispasr.exe");
-                MoveDir(found, exeRoot);
-                if (kept) MoveDir(keep, models);
-                File.Delete(zip);
+                string what = "CrispASR 运行时（" + build + " 版）";
+                Step(what, delegate { GetRuntime(wc, dlg, engDir, tmp, build, version, headless); });
+                done.Add(what);
             }
-
-            if (wantModel) GetModel(wc, dlg, engDir, model);
-            if (wantSep) GetModel(wc, dlg, engDir, SepModel);
-
+            if (wantModel) { GetModel(wc, dlg, engDir, model); done.Add("模型 " + model); }
+            if (wantSep) { GetModel(wc, dlg, engDir, SepModel); done.Add("模型 " + SepModel); }
             if (wantFf)
             {
-                // gyan.dev's "release-essentials" is a rolling URL, so no hash can be
-                // pinned; the zip is still size-checked and we only copy the two exes out.
-                string zip = Path.Combine(tmp, "ffmpeg.zip");
-                Fetch(wc, dlg, FfmpegUrl, zip, GhProxy);
-                dlg.SetInfo("解压 ffmpeg…");
-                if (!headless) Application.DoEvents();
-                string unz = Path.Combine(tmp, "ffunz");
-                ZipFile.ExtractToDirectory(zip, unz);
-                string ff = FindFile(unz, "ffmpeg.exe");
-                if (ff == null) throw new InvalidOperationException("ffmpeg zip 内未找到 ffmpeg.exe");
-                string fdir = Path.Combine(engDir, "ffmpeg");
-                Directory.CreateDirectory(fdir);
-                File.Copy(ff, Path.Combine(fdir, "ffmpeg.exe"), true);
-                string fp = FindFile(unz, "ffprobe.exe");
-                if (fp != null) File.Copy(fp, Path.Combine(fdir, "ffprobe.exe"), true);
+                Step("ffmpeg", delegate { GetFfmpeg(wc, dlg, engDir, tmp); });
+                done.Add("ffmpeg");
             }
+        }
+        catch (Exception e)
+        {
+            // name what already landed: re-running the installer skips it, and the
+            // user needs to know which of the four pieces actually broke
+            if (done.Count > 0)
+                throw new InvalidOperationException(e.Message
+                    + "\n\n已完成的组件：" + string.Join("、", done.ToArray())
+                    + "\n重新运行安装器会复用已下载好的部分（先核对 SHA-256 再决定是否重下）。", e);
+            throw;
         }
         finally
         {
@@ -148,9 +121,82 @@ static class Dl
         if (dlg.Cancelled) throw new InvalidOperationException("已取消下载");
     }
 
+    // one labelled stage: any failure names the component in the message the
+    // installer shows, instead of a bare "HTTP 404: <url>"
+    static void Step(string what, Action body)
+    {
+        try { body(); }
+        catch (Exception e)
+        {
+            if (e is ComponentError) throw;
+            Log(what + " failed: " + e);
+            throw new ComponentError(what, e);
+        }
+    }
+
+    class ComponentError : Exception
+    {
+        public ComponentError(string what, Exception inner)
+            : base("【" + what + "】下载失败\n"
+                + (string.IsNullOrEmpty(inner.Message) ? inner.GetType().Name : inner.Message), inner) { }
+    }
+
+    static void GetRuntime(WebClient wc, Dlg dlg, string engDir, string tmp, string build, string version, bool headless)
+    {
+        string asset = "crispasr-windows-x86_64-" + build + ".zip";
+        string sha;
+        string url = FindAssetUrl(asset, version, out sha);
+        dlg.SetInfo("查询 CrispASR " + build + " 版下载源…");
+        if (sha == null) Log("WARNING: " + url + " is not hash-pinned (base " + PinnedTag + ")");
+        Log("asset url: " + url);
+        string zip = Path.Combine(tmp, asset);
+        string dlUrl = url;
+        CheckSha(wc, dlg, delegate { Fetch(wc, dlg, dlUrl, zip, GhProxy); }, zip, sha);
+        dlg.SetInfo("解压 CrispASR…");
+        if (!headless) Application.DoEvents();
+        string exeRoot = Path.Combine(engDir, "CrispASR");
+        // models/ lives inside CrispASR but is ours to keep: move it aside
+        // so re-installing the runtime never throws away a 642 MB download
+        string models = Path.Combine(exeRoot, "models");
+        string keep = Path.Combine(tmp, "keepmodels");
+        bool kept = false;
+        if (Directory.Exists(models)) { MoveDir(models, keep); kept = true; }
+        if (Directory.Exists(exeRoot)) Directory.Delete(exeRoot, true);
+        string unz = Path.Combine(tmp, "unz");
+        ZipFile.ExtractToDirectory(zip, unz);
+        string found = FindCrispDir(unz);
+        if (found == null) throw new InvalidOperationException("zip 内未找到 crispasr.exe");
+        MoveDir(found, exeRoot);
+        if (kept) MoveDir(keep, models);
+        File.Delete(zip);
+    }
+
+    static void GetFfmpeg(WebClient wc, Dlg dlg, string engDir, string tmp)
+    {
+        // gyan.dev's "release-essentials" is a rolling URL, so no hash can be
+        // pinned; the zip is still size-checked and we only copy the two exes out.
+        string zip = Path.Combine(tmp, "ffmpeg.zip");
+        Fetch(wc, dlg, FfmpegUrl, zip, GhProxy);
+        dlg.SetInfo("解压 ffmpeg…");
+        string unz = Path.Combine(tmp, "ffunz");
+        ZipFile.ExtractToDirectory(zip, unz);
+        string ff = FindFile(unz, "ffmpeg.exe");
+        if (ff == null) throw new InvalidOperationException("ffmpeg zip 内未找到 ffmpeg.exe");
+        string fdir = Path.Combine(engDir, "ffmpeg");
+        Directory.CreateDirectory(fdir);
+        File.Copy(ff, Path.Combine(fdir, "ffmpeg.exe"), true);
+        string fp = FindFile(unz, "ffprobe.exe");
+        if (fp != null) File.Copy(fp, Path.Combine(fdir, "ffprobe.exe"), true);
+    }
+
     // Fetch one GGUF into <engDir>\CrispASR\models\ unless an intact copy is
     // already there (size check first, then the pinned LFS oid).
     static void GetModel(WebClient wc, Dlg dlg, string engDir, string model)
+    {
+        Step("模型 " + model, delegate { FetchModel(wc, dlg, engDir, model); });
+    }
+
+    static void FetchModel(WebClient wc, Dlg dlg, string engDir, string model)
     {
         string mdir = Path.Combine(Path.Combine(engDir, "CrispASR"), "models");
         Directory.CreateDirectory(mdir);
@@ -268,6 +314,16 @@ static class Dl
         bool ok = got.Equals(sha, StringComparison.OrdinalIgnoreCase);
         Log((ok ? "sha ok   " : "sha FAIL ") + Path.GetFileName(file) + " " + got);
         return ok;
+    }
+
+    public static string Sha256Bytes(byte[] data)
+    {
+        using (var hash = SHA256.Create())
+        {
+            var sb = new StringBuilder(64);
+            foreach (var b in hash.ComputeHash(data)) sb.Append(b.ToString("x2"));
+            return sb.ToString();
+        }
     }
 
     // download, then refuse to install anything whose hash doesn't match; a

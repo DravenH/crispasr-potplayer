@@ -64,10 +64,10 @@ static class Installer
 
         string engDir = Path.Combine(dir, @"Engine\Whisper-Faster");
         string iniPath = Path.Combine(engDir, "shim.ini");
-        bool createdIni = false;
+        InstallRes res = null;
         try
         {
-            createdIni = Install(dir);
+            res = Install(dir);
         }
         catch (Exception e)
         {
@@ -113,7 +113,8 @@ static class Installer
         if (quiet) return dlError == null ? 0 : 4;
         if (dlError != null)
             MessageBox.Show("组件下载失败（垫片本身已安装成功）：\n" + dlError
-                + "\n可参考 README 手动下载 CrispASR 与模型，再编辑 shim.ini。",
+                + "\n\n可参考 README 手动下载对应组件，放进目录后重跑安装器即可（已下好的会跳过）。"
+                + "\n详细日志：" + LogPath,
                 "CrispASR for PotPlayer", MessageBoxButtons.OK, MessageBoxIcon.Warning);
 
         string tail = didDownload ? "\n组件已下载完成，shim.ini 路径已按安装目录自动配置。"
@@ -121,8 +122,8 @@ static class Installer
                 ? "\n已检测到 CrispASR，shim.ini 路径已自动配置。"
                 : "\nshim.ini 已按安装目录预置组件路径：" + engDir + "\\CrispASR\\"
                   + "\n稍后把 CrispASR（含 models 目录里的模型）放进该目录即可直接使用，无需再改配置。");
-        if (File.Exists(Path.Combine(engDir, "whisper-faster.real.exe")))
-            tail += "\n原有的官方 whisper-faster 引擎已备份为 whisper-faster.real.exe，随时可改回还原。";
+        if (res != null && res.BackupNote != null)
+            tail += "\n" + res.BackupNote + "，把它改回 whisper-faster.exe 即可还原官方引擎。";
         MessageBox.Show(
             "安装完成：\n" + Path.Combine(engDir, "whisper-faster.exe") + tail
             + "\n\n重启 PotPlayer 后，在『声音生成字幕』引擎下拉选 Whisper-Faster 即可。",
@@ -225,46 +226,75 @@ static class Installer
     // our shim build always embeds this log filename; .NET string literals live in
     // the #US heap as UTF-16, so match that encoding. The genuine whisper-faster
     // engine does not contain it -> reliable "is this ours?" marker.
-    static bool LooksLikeOurShim(string exePath)
+    static bool ContainsMarker(byte[] buf)
     {
-        try
+        byte[] pat = Encoding.Unicode.GetBytes("crispasr-xxl-shim.log");
+        for (int i = 0; i + pat.Length <= buf.Length; i++)
         {
-            var fi = new FileInfo(exePath);
-            if (!fi.Exists || fi.Length > 1024 * 1024) return false;   // our shim is ~16 KB
-            byte[] buf = File.ReadAllBytes(exePath);
-            byte[] pat = Encoding.Unicode.GetBytes("crispasr-xxl-shim.log");
-            for (int i = 0; i + pat.Length <= buf.Length; i++)
-            {
-                int j = 0;
-                while (j < pat.Length && buf[i + j] == pat[j]) j++;
-                if (j == pat.Length) return true;
-            }
+            int j = 0;
+            while (j < pat.Length && buf[i + j] == pat[j]) j++;
+            if (j == pat.Length) return true;
         }
-        catch { }
         return false;
     }
 
-    // returns true when the shim.ini was (re)written by this run
-    static bool Install(string ppDir)
+    static bool SameBytes(byte[] a, byte[] b)
+    {
+        if (a.Length != b.Length) return false;
+        for (int i = 0; i < a.Length; i++) if (a[i] != b[i]) return false;
+        return true;
+    }
+
+    // never overwrite a previous backup: whisper-faster.real.exe, then a stamped name
+    static string UniqueRealPath(string dst)
+    {
+        string p = Path.Combine(dst, "whisper-faster.real.exe");
+        if (!File.Exists(p)) return p;
+        return Path.Combine(dst, "whisper-faster.real-" + DateTime.Now.ToString("yyyyMMdd-HHmmss") + ".exe");
+    }
+
+    static string Sha256Prefix(byte[] buf)
+    {
+        try { return Dl.Sha256Bytes(buf).Substring(0, 16); }
+        catch { return "unknown"; }
+    }
+
+    // installs the shim into the slot and returns a note about any pre-existing
+    // engine exe (null when there was nothing to say)
+    static InstallRes Install(string ppDir)
     {
         string dst = Path.Combine(ppDir, @"Engine\Whisper-Faster");
         Directory.CreateDirectory(dst);
 
         string exePath = Path.Combine(dst, "whisper-faster.exe");
         string iniPath = Path.Combine(dst, "shim.ini");
-        string realPath = Path.Combine(dst, "whisper-faster.real.exe");
-        bool ours = File.Exists(exePath) && LooksLikeOurShim(exePath);
-        if (File.Exists(exePath) && !ours && !File.Exists(realPath))
+        byte[] exe = Res("wf.exe");
+
+        // Anything already in the slot is classified before it is touched: byte-identical
+        // to what we ship, or carrying our marker -> ours, overwrite it. Everything else
+        // (the official engine, or a file we cannot read) is only ever renamed, never
+        // deleted -- we cannot hash-match "official" because upstream ships new builds
+        // continuously, so "not ours" is the safe, decidable question.
+        InstallRes r = new InstallRes();
+        bool ours = false;
+        if (File.Exists(exePath))
         {
-            // genuine engine the user downloaded: keep it recoverable, never delete
-            File.Move(exePath, realPath);
-            if (File.Exists(iniPath)) File.Delete(iniPath); // ini of a different setup
+            byte[] cur = null;
+            try { cur = File.ReadAllBytes(exePath); } catch { }
+            ours = cur != null && (SameBytes(cur, exe) || ContainsMarker(cur));
+            if (!ours)
+            {
+                string real = UniqueRealPath(dst);
+                File.Move(exePath, real);
+                if (File.Exists(iniPath)) File.Delete(iniPath); // ini of a different setup
+                r.BackupNote = "原有引擎已备份为 " + Path.GetFileName(real)
+                    + "（" + (cur == null ? "无法读取" : cur.Length + " 字节，SHA-256 " + Sha256Prefix(cur) + "…") + "）";
+                Log("backed up non-shim engine: " + real);
+            }
         }
 
-        byte[] exe = Res("wf.exe");
         File.WriteAllBytes(exePath, exe);
-
-        if (ours && File.Exists(iniPath)) return false; // upgrade in place, keep user's ini
+        if (ours && File.Exists(iniPath)) return r; // upgrade in place, keep user's ini
 
         string tpl = Encoding.UTF8.GetString(Res("ini.txt"));
         if (tpl.Length > 0 && tpl[0] == '\uFEFF') tpl = tpl.Substring(1);
@@ -287,7 +317,14 @@ static class Installer
         if (Directory.Exists(ffdir) && File.Exists(Path.Combine(ffdir, "ffmpeg.exe")))
             tpl = ReplaceKey(tpl, "ffmpeg_dir", ffdir);
         File.WriteAllText(iniPath, tpl, new UTF8Encoding(false));
-        return true;
+        r.IniWritten = true;
+        return r;
+    }
+
+    class InstallRes
+    {
+        public bool IniWritten;       // shim.ini generated fresh this run
+        public string BackupNote;     // set when a non-shim engine exe was preserved
     }
 
     static string ReplaceKey(string text, string key, string value)
