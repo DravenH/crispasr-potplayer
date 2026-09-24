@@ -1,5 +1,6 @@
 ; ===== CrispASR PotPlayer 垫片配置 =====
 ; 复制为 shim.ini 放在 whisper-faster.exe 同目录；某项留空 = 自动探测。
+; model / separation_model 即使填了路径，文件已不存在（误删/改名/挪走）时也会回退到自动探测并在日志里说明。
 ; 组件按安装器布局摆放（同目录 CrispASR\ 与 CrispASR\models\）时可以不放本文件。
 
 ; crispasr.exe 完整路径；下载 https://github.com/CrispStrobe/CrispASR/releases

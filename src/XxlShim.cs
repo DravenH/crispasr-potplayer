@@ -147,30 +147,33 @@ static class XxlShim
         catch (Exception e) { err = e.GetType().Name + ": " + e.Message; try { File.Delete(dst); } catch { } return false; }
     }
 
+    // an ini-supplied path can hold characters Path.Combine rejects ('|', a stray tab
+    // from copy-pasting); that must read as "not here", never as an engine crash
+    static string TryCombine(string dir, string file)
+    {
+        try { return Path.Combine(dir, file); } catch { return null; }
+    }
+
     static string FindFfmpeg(string ffmpegDir)
     {
         if (!string.IsNullOrEmpty(ffmpegDir))
         {
-            string p = Path.Combine(ffmpegDir, "ffmpeg.exe");
-            if (File.Exists(p)) return p;
+            string p = TryCombine(ffmpegDir, "ffmpeg.exe");
+            if (p != null && File.Exists(p)) return p;
         }
         string local = Path.Combine(ExeDir, @"ffmpeg\ffmpeg.exe");
         if (File.Exists(local)) return local;
         string envDir = Ini("ffmpeg_dir", "");
         if (envDir.Length > 0)
         {
-            local = Path.Combine(envDir, "ffmpeg.exe");
-            if (File.Exists(local)) return local;
+            local = TryCombine(envDir, "ffmpeg.exe");
+            if (local != null && File.Exists(local)) return local;
         }
         foreach (var d in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(';'))
         {
             if (d.Length == 0) continue;
-            try
-            {
-                string p = Path.Combine(d.Trim(), "ffmpeg.exe");
-                if (File.Exists(p)) return p;
-            }
-            catch { }
+            string p = TryCombine(d.Trim(), "ffmpeg.exe");
+            if (p != null && File.Exists(p)) return p;
         }
         return null;
     }
@@ -341,13 +344,21 @@ static class XxlShim
         }
 
         // defaults: next to the shim exe, or under .\CrispASR\ (installer layout);
-        // an explicit shim.ini value always wins
+        // an explicit shim.ini value wins as long as the file it names is there
+        LogEnabled = Ini("log", "1") != "0";
         string crispasr = Ini("crispasr", "");
         if (crispasr.Length == 0)
             crispasr = PickExisting(
                 Path.Combine(ExeDir, @"CrispASR\crispasr.exe"),
                 Path.Combine(ExeDir, "crispasr.exe"));
         string model = Ini("model", "");
+        // a configured path that no longer exists (deleted or renamed model file) is a
+        // mistake rather than a preference: search again, and say so in the log
+        if (model.Length > 0 && !File.Exists(model))
+        {
+            Log("shim: configured model missing, searching again: " + model);
+            model = "";
+        }
         if (model.Length == 0)
             model = PickExisting(
                 Path.Combine(ExeDir, @"CrispASR\models\parakeet-tdt-0.6b-ja-q8_0.gguf"),
@@ -356,9 +367,13 @@ static class XxlShim
                 Path.Combine(ExeDir, @"models\parakeet-tdt-0.6b-ja.gguf"));
         string extra    = Ini("extra",    "--split-on-punct --flush-after 1");
         bool useGpu     = Ini("nogpu", "0") != "1";
-        LogEnabled      = Ini("log", "1") != "0";
         bool vocals     = Ini("vocals", "0") == "1";
         string sepModel = Ini("separation_model", "");
+        if (sepModel.Length > 0 && !File.Exists(sepModel))
+        {
+            Log("shim: configured separation_model missing, searching again: " + sepModel);
+            sepModel = "";
+        }
         if (sepModel.Length == 0)
             sepModel = PickExisting(
                 Path.Combine(ExeDir, @"CrispASR\models\mel-band-roformer-vocals-f16.gguf"),
@@ -368,6 +383,11 @@ static class XxlShim
             ffmpegDir = Path.Combine(ExeDir, "ffmpeg");
 
         if (!File.Exists(crispasr)) { Console.Error.WriteLine("shim: crispasr not found: " + crispasr); return 2; }
+        // not a hard stop: crispasr may still resolve something we cannot see locally
+        if (!File.Exists(model))
+            Log("shim: no local model file at " + model
+                + " ; put the .gguf under " + Path.Combine(ExeDir, @"CrispASR\models")
+                + " or set 'model' in shim.ini");
 
         string input = null;
         foreach (var p in positional)
