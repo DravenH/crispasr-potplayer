@@ -8,6 +8,10 @@
 实测（RTX 5090，CUDA 构建，2 小时 27 分电影 / 283MB WAV）：**约 36 秒完成，≈246× 实时**，
 1400+ 条字幕，等待体验接近即时。
 
+> 非官方第三方集成：本项目与 PotPlayer（Kakao/Daum）、CrispASR 及其作者、NVIDIA 均无关联，
+> 也未获任何背书。全部第三方组件由用户自行从官方源下载，本仓库不内置、不重新分发任何
+> 二进制或模型权重（详见文末 [第三方许可与致谢](#第三方许可与致谢)）。
+
 ## 背景：PotPlayer 是怎么调引擎的
 
 PotPlayer"声音生成字幕"（离线菜单）以**子进程 + 命令行**方式调用引擎，
@@ -129,6 +133,11 @@ PotPlayer 播放影片 → 右键菜单 / 字幕菜单 → **声音生成字幕*
 
 ## 故障排查
 
+- **Windows SmartScreen 拦截**（"已保护你的电脑 / Windows 已阻止启动未识别的应用"）：
+  安装器与垫片都**未做代码签名**（个人项目不购买证书），且安装器会从 GitHub 下载并运行
+  crispasr.exe，这两点合起来容易触发 SmartScreen 与部分杀软的启发式告警。
+  在拦截弹窗上点 **更多信息 → 仍要运行** 即可；不放心的话先自行核对文件哈希再运行，
+  也可以完全跳过安装器、按 [方式二](#安装) 手动复制文件。
 - **弹窗报错/无字幕**：先看 `%TEMP%\crispasr-xxl-shim.log`，每行含时间戳；
   `=== invoked:` 是 PotPlayer 传来的原始命令，`crispasr cmd:` 是转译结果。
 - `miniaudio and ffmpeg both failed`：垫片已内置对策（等待文件写稳 → 探测可读性 →
@@ -166,5 +175,31 @@ src\build.bat
 
 ## License
 
-MIT。本仓库不含 PotPlayer、CrispASR、模型或 ffmpeg 的任何二进制/权重文件；
-它们各自遵循其上游许可证，请自行下载。
+本项目自身代码（`src\`、`config\`、`tools\`）采用 **MIT**，见 `LICENSE`。
+
+## 第三方许可与致谢
+
+本仓库**不含**下列任何组件的二进制或模型权重；安装器只是引导你的机器从官方源下载，
+下载后各文件的上游许可证（crispasr 的 zip 里自带 `LICENSE` 与 `THIRD_PARTY_NOTICES.txt`）
+会原样保留在安装目录中。
+
+| 组件 | 用途 | 许可证 | 来源 |
+|---|---|---|---|
+| [CrispASR](https://github.com/CrispStrobe/CrispASR) | 实际执行识别的引擎 | **MIT** | GitHub Releases |
+| [parakeet-tdt_ctc-0.6b-ja](https://huggingface.co/nvidia/parakeet-tdt_ctc-0.6b-ja) | NVIDIA 日语语音模型 | **CC-BY-4.0** | Hugging Face |
+| [parakeet-tdt-0.6b-ja-GGUF](https://huggingface.co/cstr/parakeet-tdt-0.6b-ja-GGUF) | 上述模型的 GGUF 转换版（本项目实际下载） | **CC-BY-4.0** | Hugging Face（国内走 hf-mirror 镜像） |
+| [silero VAD](https://github.com/snakers4/silero-vad) | crispasr `--vad` 首次运行时自动下载的静音检测模型 | 见上游仓库声明 | 由 crispasr 自行下载 |
+| [ffmpeg](https://www.gyan.dev/ffmpeg/builds/) | 解码兜底 / 批量脚本抽音轨 | **GPL-3.0**（gyan 构建） | gyan.dev |
+| [PotPlayer](https://potplayer.daum.net/) | 宿主播放器，提供引擎槽位 | 专有免费软件 | 官方站点 |
+
+感谢 CrispASR、NVIDIA（Parakeet 模型）、ggml/whisper.cpp 与 silero 的作者们把工具和模型开源。
+CC-BY-4.0 要求再分发模型时保留署名——你若把模型文件复制给他人，请连同本表格一并转达出处。
+
+## 免责说明
+
+- 转录他人享有版权的音视频（包括番剧、电影、播客）是否合规，**由使用者自行负责**；
+  本项目只提供技术链路，不构成任何版权方面的建议或授权。
+- 安装器默认下载上游**最新发布版**且不校验哈希，若你介意供应链风险，
+  可自行下载指定版本、核对哈希后用 [方式二](#安装) 手动部署。
+- 软件按"现状"提供，不含任何明示或暗示的保证；因使用本项目导致的数据丢失、
+  系统问题等后果，作者不承担责任。
