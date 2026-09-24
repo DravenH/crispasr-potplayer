@@ -53,6 +53,12 @@ crispasr -m <model.gguf> -f <audio> -l ja --vad -osrt -of <out>\<base> --split-o
    作为最后兜底调用。仅 PotPlayer 内使用可以不装；若还要跑本仓库的
    `tools\transcribe-ja.ps1` 批量脚本（从 mkv/mp4 抽音轨），则**必须**有 ffmpeg。
    放进 `shim.ini` 的 `ffmpeg_dir`（或同目录 `ffmpeg\`）即可注入兜底。
+   - 安装器取的是**固定版 6.1.1**（gyan.dev 官方 essentials 构建，由 ffmpeg-static
+     以 `.gz` 形式重新发布，解压后就是 `ffmpeg.exe`），国内下载快的镜像：
+     `https://cdn.npmmirror.com/binaries/ffmpeg-static/b6.1.1/ffmpeg-win32-x64.gz`
+     （另可走 `https://gh-proxy.org/https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffmpeg-win32-x64.gz`）
+     解压后改名 `ffmpeg.exe` 放进 `Engine\Whisper-Faster\ffmpeg\` 即可（校验值见下文
+     "版本与校验值"，安装器下载时会自动比对；`ffprobe` 同理，可选）
 4. **人声分离模型**（可选）— `mel-band-roformer-vocals-f16.gguf`（≈436 MB，上游只发布 f16）
    - `https://hf-mirror.com/cstr/mel-band-roformer-vocals-GGUF`
    - 只在 `shim.ini` 里设 `vocals=1` 时用到，见下文"人声分离（抗 BGM）"
@@ -95,13 +101,17 @@ crispasr -m <model.gguf> -f <audio> -l ja --vad -osrt -of <out>\<base> --split-o
   | CrispASR Vulkan 版 | AMD / Intel 显卡，或 CUDA 版报错时 |
   | CrispASR CPU 版（含 legacy） | 无独显；legacy 供不支持 AVX2 的老 CPU |
   | 模型 q8_0 ≈642MB（推荐）/ f16 ≈1190MB | 精度几乎无差别，q8_0 加载更快 |
-  | ffmpeg ≈115MB（可选勾选） | crispasr 内置解码失败时的兜底解码器；仅 PotPlayer 内用可不装 |
+  | ffmpeg ≈56MB（可选勾选） | crispasr 内置解码失败时的兜底解码器，固定版 6.1.1（落盘后 ≈158 MB）；仅 PotPlayer 内用可不装 |
   | 启用人声分离（默认关闭，≈436MB） | 抗 BGM 前置；勾选会连带下载 ffmpeg，并在 `shim.ini` 写入 `vocals=1`，见"人声分离" |
   默认**只下载已验证固定的上游版本 v0.8.36**，下载完逐个核对内置 SHA-256
-  （不匹配会重试一次后报错，绝不解压安装），**不会自动跟随“最新版”**；
+  （不匹配会重下，仍不匹配就报错终止，绝不解压安装），**不会自动跟随“最新版”**；
   确需升级时在弹框勾选“检查最新版”（此路径不校验哈希）或用 `/version:<tag>` 指定；
   直连失败走 `gh-proxy.org`，模型走 hf-mirror → huggingface 回退，
   落盘到 `<PotPlayer>\Engine\Whisper-Faster\CrispASR\`，并自动写入 `shim.ini`
+- **断点续传**：未下完的文件以 `<目标名>.part` 留在原地（模型就在 `CrispASR\models\` 里），
+  重跑安装器、甚至换到下一个镜像都会用 HTTP Range 接着传，不会从头再来；
+  合并结果照样过 SHA-256，接错了就报校验失败重下（没有校验值可比的下载——gyan 兜底、
+  `/version:latest`——换源时会丢弃半截文件重来，避免混入两种内容）。取消/断网后重跑尤其省事
 - PotPlayer 装在 `Program Files` 等受保护目录时，请右键 → **以管理员身份运行**
 - **重跑安装器 = 修复**：运行时 / 模型 / `shim.ini` 三件事**每次运行都各自独立检查**，
   互不遮蔽（不会因为 CrispASR 版本正确就跳过后面两步）：
@@ -109,7 +119,8 @@ crispasr -m <model.gguf> -f <audio> -l ja --vad -osrt -of <out>\<base> --split-o
     已就位的绝不重复下载，只下载真正缺的那几项（弹窗与日志都会列出缺什么）
   - 误删模型、把 `CrispASR\models\` 改名、`shim.ini` 里的路径挪动过，重跑一次即可修好：
     `shim.ini` **只重写已经失效的键**（指向不存在的路径）并重新自动探测，
-    能用的路径——包括你指向别处的自定义路径——**逐字节保留**，绝盖手写配置
+    能用的路径——包括你指向别处的自定义路径——**内容原样保留**（只把旧版本攒下的重复
+    `\r` 压平，也就是那些平白多出来的空行），绝不覆盖手写配置
   - 需要连已通过校验的组件一起重装时加 `/force`
     （图形界面里对应"重新下载 CrispASR 运行时"勾选框，只在检测到已有运行时时出现）
   - 下载失败/取消**不影响** `shim.ini` 这一步：两者分开做，修复始终会跑
@@ -141,10 +152,11 @@ whisper-faster / faster-whisper-xxl 引擎，互不冲突：本项目只占
 
 ## 版本与校验值
 
-安装器内置了下面这张表（`src\Download.cs` 的 `PinnedTag` / `AssetSha` / `ModelSha`）：
-默认只从 **v0.8.36** 下载，落盘后按 SHA-256 校验，不匹配就重试一次并报错终止，
-**不会解压安装未通过校验的文件**。模型值取自 HuggingFace 的 LFS oid（即文件本体 sha256），
-镜像站 hf-mirror 提供的是同一份字节，因此同样适用。
+安装器内置了下面这张表（`src\Download.cs` 的 `PinnedTag` / `AssetSha` / `ModelSha` /
+`Ffmpeg*Sha`）：默认只从 **v0.8.36** 与 **ffmpeg-static b6.1.1** 下载，落盘后按
+SHA-256 校验，不匹配就重试并报错终止，**不会解压安装未通过校验的文件**。
+模型值取自 HuggingFace 的 LFS oid（即文件本体 sha256），镜像站 hf-mirror 提供的是
+同一份字节，因此同样适用。
 
 ```
 crispasr-windows-x86_64-cpu.zip         1d8c853d102671f4036ccf4da8573a6d9ed3d45ae4530aa07573760a4bc93dc1
@@ -156,17 +168,25 @@ parakeet-tdt-0.6b-ja-q8_0.gguf          5a61e6c7d956c3c72a76fafcd798cac0c9ea66d0
 parakeet-tdt-0.6b-ja.gguf               374eb0132eebaec4df77a9631cbbeb03790be48a4a517f6cc8e8bdb38fe9a584
 parakeet-tdt-0.6b-ja-q4_k.gguf          9a9bdfec5a1f119983a00367d33fb310759d67619309f02500f649c5328ab825
 mel-band-roformer-vocals-f16.gguf       fe94b114bce12653dae4e94968d28cbab36dcdd0c783fc052c3b656218233f24
+ffmpeg-win32-x64.gz    (下载)           8883a3dffbd0a16cf4ef95206ea05283f78908dbfb118f73c83f4951dcc06d77
+ffmpeg.exe             (解压后 79 MB)   04e1307997530f9cf2fe35cba2ca7e8875ca91da02f89d6c7243df819c94ad00
+ffprobe-win32-x64.gz   (下载)           f309e6223ad89d2fe54bccd420a7709b66fd27540674e92309578ed491a43c8d
+ffprobe.exe            (解压后 79 MB)   3a7e2dc003dc2cd1472827e4c7c4f056ae1ae0ae7c5bbc580c99b49827351ba4
 ```
 
-两点已知例外：
+ffmpeg 两端都核：先校验下载到的 `.gz`，gunzip 后再校验解出来的 `.exe`（大小 + 哈希），
+所以镜像给的字节与 gyan.dev 官方构建一致时才落盘。gyan.dev 的滚动
+`ffmpeg-release-essentials.zip`（内容随版本变化、无法固定哈希）只在上面两个镜像
+全部不可用时才作为最后兜底，且慢到一定程度（<10 KB/s）会主动放弃而不是干等。
 
-- **ffmpeg 不校验**：gyan.dev 的 `ffmpeg-release-essentials.zip` 是滚动地址，
-  内容随版本变化，无法固定哈希；安装器只取其中的 `ffmpeg.exe` / `ffprobe.exe`。
+一个已知例外：
+
 - **升级路径不校验**：勾选"检查最新版"或传 `/version:<其它 tag>` 时，
   下载的是本表之外的文件，自然无哈希可比。
 
 维护者升级流程：换 `build` 实测新版可用 → 更新 `PinnedTag` 与 `AssetSha`
-（`sha256sum` 或 `Get-FileHash` 自行取值）→ 重新编译发布。
+（`sha256sum` 或 `Get-FileHash` 自行取值）→ 重新编译发布。换 ffmpeg 版本同理，
+改 `FfmpegTag` 并重取四个 `Ffmpeg*Sha` / 字节数（`.gz` 与其解出的 `.exe` 各一）。
 
 ## 使用
 
@@ -286,7 +306,7 @@ src\build.bat
 | [parakeet-tdt-0.6b-ja-GGUF](https://huggingface.co/cstr/parakeet-tdt-0.6b-ja-GGUF) | 上述模型的 GGUF 转换版（本项目实际下载） | **CC-BY-4.0** | Hugging Face（国内走 hf-mirror 镜像） |
 | [mel-band-roformer-vocals-GGUF](https://huggingface.co/cstr/mel-band-roformer-vocals-GGUF) | 可选的人声分离模型（`vocals=1` 时下载） | **MIT**：转换仓库与其声明的权重来源 [KimberleyJSN/melbandroformer](https://huggingface.co/KimberleyJSN/melbandroformer) 均标 MIT，架构来自 MIT 的 [lucidrains/BS-RoFormer](https://github.com/lucidrains/BS-RoFormer) | Hugging Face |
 | [silero VAD](https://github.com/snakers4/silero-vad) | crispasr `--vad` 首次运行时自动下载的静音检测模型 | 见上游仓库声明 | 由 crispasr 自行下载 |
-| [ffmpeg](https://www.gyan.dev/ffmpeg/builds/) | 解码兜底 / 批量脚本抽音轨 | **GPL-3.0**（gyan 构建） | gyan.dev |
+| [ffmpeg](https://www.gyan.dev/ffmpeg/builds/) | 解码兜底 / 批量脚本抽音轨 | **GPL-3.0**（gyan 构建） | gyan.dev 官方构建，安装器取 [ffmpeg-static](https://github.com/eugeneware/ffmpeg-static) 重发布的同一份 b6.1.1（经 npmmirror 镜像分发） |
 | [PotPlayer](https://potplayer.daum.net/) | 宿主播放器，提供引擎槽位 | 专有免费软件 | 官方站点 |
 
 感谢 CrispASR、NVIDIA（Parakeet 模型）、ggml/whisper.cpp 与 silero 的作者们把工具和模型开源。

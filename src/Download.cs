@@ -32,7 +32,20 @@ static class Dl
     const string SepRepo = "cstr/mel-band-roformer-vocals-GGUF"; // optional vocals pre-pass
     const string ModelHost1 = "https://hf-mirror.com/";
     const string ModelHost2 = "https://huggingface.co/";
-    const string FfmpegUrl = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip";
+
+    // ffmpeg: gyan.dev's rolling zip measured ~900 B/s from CN networks, so the
+    // default is the same build mirrored as a fixed-version gzip (28 MB, hashable)
+    // on two fast hosts; gyan.dev stays as the last-resort source.
+    const string FfmpegTag = "b6.1.1";
+    const string FfmpegCdn = "https://cdn.npmmirror.com/binaries/ffmpeg-static/" + FfmpegTag + "/";
+    const string FfmpegGithub = "https://github.com/eugeneware/ffmpeg-static/releases/download/" + FfmpegTag + "/";
+    const string FfmpegGzSha = "8883a3dffbd0a16cf4ef95206ea05283f78908dbfb118f73c83f4951dcc06d77";
+    const string FfmpegExeSha = "04e1307997530f9cf2fe35cba2ca7e8875ca91da02f89d6c7243df819c94ad00";
+    const long FfmpegExeBytes = 82797568L;
+    const string FfprobeGzSha = "f309e6223ad89d2fe54bccd420a7709b66fd27540674e92309578ed491a43c8d";
+    const string FfprobeExeSha = "3a7e2dc003dc2cd1472827e4c7c4f056ae1ae0ae7c5bbc580c99b49827351ba4";
+    const long FfprobeExeBytes = 82668032L;
+    const string FfmpegZipUrl = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip";
 
     // Upstream release the maintainer verified by hand; every asset below is
     // sha256-checked against this tag. Bump PinnedTag + refresh the table only
@@ -111,7 +124,8 @@ static class Dl
         var dlg = new Dlg();
         if (!headless) { dlg.Show(); Application.DoEvents(); }
 
-        string tmp = Path.Combine(Path.GetTempPath(), "crispasr-dl-" + DateTime.Now.ToString("HHmmss"));
+        // stable name: a killed run leaves its .part behind and the next run resumes
+        string tmp = Path.Combine(Path.GetTempPath(), "crispasr-dl");
         Directory.CreateDirectory(tmp);
         var wc = NewClient();
         var done = new List<string>();
@@ -143,7 +157,7 @@ static class Dl
         }
         finally
         {
-            try { Directory.Delete(tmp, true); } catch { }
+            try { CleanTmp(tmp); } catch { }
             try { dlg.Close(); } catch { }
         }
         if (dlg.Cancelled) throw new Cancelled();
@@ -195,8 +209,9 @@ static class Dl
         if (sha == null) Log("WARNING: " + url + " is not hash-pinned (base " + PinnedTag + ")");
         Log("asset url: " + url);
         string zip = Path.Combine(tmp, asset);
-        string dlUrl = url;
-        CheckSha(wc, dlg, delegate { Fetch(wc, dlg, dlUrl, zip, GhProxy); }, zip, sha);
+        // GitHub direct first, then the same URL through gh-proxy
+        string[] urls = new string[] { url, GhProxy + url };
+        CheckSha(wc, dlg, delegate { FetchSources(wc, dlg, urls, zip, !string.IsNullOrEmpty(sha)); }, zip, sha);
         dlg.SetInfo("解压 CrispASR…");
         if (!headless) Application.DoEvents();
         string exeRoot = Path.Combine(engDir, "CrispASR");
@@ -237,12 +252,120 @@ static class Dl
         File.Delete(zip);
     }
 
+    // ffmpeg lands as <engDir>\ffmpeg\ffmpeg.exe (+ ffprobe.exe when it arrives).
+    // First the pinned gzip mirrors, verified at both ends; only if every one of
+    // them fails does the uncheckable rolling gyan zip get its turn.
     static void GetFfmpeg(WebClient wc, Dlg dlg, string engDir, string tmp)
     {
-        // gyan.dev's "release-essentials" is a rolling URL, so no hash can be
-        // pinned; the zip is still size-checked and we only copy the two exes out.
+        string fdir = Path.Combine(engDir, "ffmpeg");
+        try
+        {
+            FetchGzToExe(wc, dlg, GzUrls("ffmpeg-win32-x64.gz"), Path.Combine(tmp, "ffmpeg-" + FfmpegTag + ".gz"),
+                         FfmpegGzSha, Path.Combine(fdir, "ffmpeg.exe"), FfmpegExeSha, FfmpegExeBytes);
+            try
+            {
+                FetchGzToExe(wc, dlg, GzUrls("ffprobe-win32-x64.gz"), Path.Combine(tmp, "ffprobe-" + FfmpegTag + ".gz"),
+                             FfprobeGzSha, Path.Combine(fdir, "ffprobe.exe"), FfprobeExeSha, FfprobeExeBytes);
+            }
+            catch (Exception e)
+            {
+                if (dlg.Cancelled) throw new Cancelled();
+                Log("ffprobe skipped: " + e.Message);      // crispasr only ever calls ffmpeg
+                dlg.SetInfo("ffprobe 未取到，已跳过（crispasr 只调用 ffmpeg）…");
+                try { File.Delete(Path.Combine(fdir, "ffprobe.exe")); } catch { }
+            }
+            return;
+        }
+        catch (Cancelled) { throw; }
+        catch (Exception e)
+        {
+            if (dlg.Cancelled) throw new Cancelled();
+            Log("mirrored ffmpeg sources failed: " + e);
+            dlg.SetInfo("镜像源都不可用，改用 gyan.dev 官方 zip（可能很慢）…");
+        }
+        GetFfmpegFromZip(wc, dlg, engDir, tmp);
+    }
+
+    static string[] GzUrls(string asset)
+    {
+        return new string[] { FfmpegCdn + asset, GhProxy + FfmpegGithub + asset };
+    }
+
+    // download the gzip (hash-checked), gunzip it, then hash the exe it produced
+    static void FetchGzToExe(WebClient wc, Dlg dlg, string[] urls, string gzFile, string gzSha,
+                             string exeFile, string exeSha, long exeBytes)
+    {
+        for (int attempt = 0; attempt < 2; attempt++)
+        {
+            CheckSha(wc, dlg, delegate
+            {
+                FetchSources(wc, dlg, urls, gzFile, !string.IsNullOrEmpty(gzSha));
+            }, gzFile, gzSha);
+            dlg.SetInfo("解压 " + Path.GetFileName(gzFile) + " …");
+            // only create the target dir once a gzip is actually in hand: a run that
+            // never got one should not leave an empty ffmpeg\ behind
+            Directory.CreateDirectory(Path.GetDirectoryName(exeFile));
+            Gunzip(gzFile, exeFile);
+            if (new FileInfo(exeFile).Length == exeBytes && Verify(exeFile, exeSha)) return;
+            Log("gunzip verify failed for " + exeFile + ", attempt " + attempt);
+            try { File.Delete(gzFile); } catch { }
+            try { File.Delete(gzFile + ".part"); } catch { }
+        }
+        throw new InvalidOperationException("内容校验失败（下载不完整或与固定版本不符）："
+            + Path.GetFileName(exeFile) + "\n期望 SHA-256：" + exeSha);
+    }
+
+    static void Gunzip(string src, string dst)
+    {
+        if (File.Exists(dst)) File.Delete(dst);
+        using (var f = new FileStream(src, FileMode.Open, FileAccess.Read, FileShare.Read))
+        using (var gz = new GZipStream(f, CompressionMode.Decompress))
+        using (var o = new FileStream(dst, FileMode.Create, FileAccess.Write, FileShare.None))
+        {
+            var buf = new byte[1048576];
+            int n;
+            while ((n = gz.Read(buf, 0, buf.Length)) > 0) o.Write(buf, 0, n);
+        }
+    }
+
+    // every source in order, three attempts each; the retries after the first one
+    // resume from the .part the previous attempt left behind instead of restarting.
+    // `pinned` says the caller checks a SHA-256 afterwards, which makes it safe to
+    // carry that .part over to the next host too (HF's CDN drops 600 MB transfers
+    // regularly, and hf-mirror and huggingface.co serve the very same bytes) -- a
+    // bad merge simply fails the hash and gets redownloaded. Without a hash to check
+    // we never mix bytes from two hosts.
+    static void FetchSources(WebClient wc, Dlg dlg, string[] urls, string file, bool pinned)
+    {
+        // half-downloaded files are only ever spliced when a SHA-256 will check the
+        // result: a rolling upstream (the gyan zip, /version:latest) can change under us
+        if (!pinned) { try { File.Delete(file + ".part"); } catch { } }
+        Exception last = null;
+        foreach (var u in urls)
+        {
+            for (int t = 0; t < 3; t++)
+            {
+                try { FetchOnce(wc, dlg, u, file); return; }
+                catch (Exception e)
+                {
+                    if (dlg.Cancelled) throw e is Cancelled ? e : new Cancelled();
+                    last = e;
+                    Log("url failed " + u + " : " + e.Message);
+                    if (t < 2) dlg.SetInfo("同一源重试（已下部分会续传）…");
+                }
+            }
+            if (!pinned) try { File.Delete(file + ".part"); } catch { }
+        }
+        if (last != null) throw last;
+        throw new InvalidOperationException("所有下载源均失败: " + file);
+    }
+
+    // rolling gyan.dev zip: no hash can be pinned, so it is only a fallback
+    static void GetFfmpegFromZip(WebClient wc, Dlg dlg, string engDir, string tmp)
+    {
         string zip = Path.Combine(tmp, "ffmpeg.zip");
-        Fetch(wc, dlg, FfmpegUrl, zip, GhProxy);
+        // gh-proxy only mirrors github.com, so a proxy prefix on this URL is useless
+        FetchSources(wc, dlg, new string[] { FfmpegZipUrl }, zip, false);
         dlg.SetInfo("解压 ffmpeg…");
         string unz = Path.Combine(tmp, "ffunz");
         ZipFile.ExtractToDirectory(zip, unz);
@@ -282,7 +405,7 @@ static class Dl
             string[] murls = new string[] {
                 ModelHost1 + repo + "/resolve/main/" + model,
                 ModelHost2 + repo + "/resolve/main/" + model };
-            CheckSha(wc, dlg, delegate { FetchAny(wc, dlg, murls, mfile); }, mfile, msha);
+            CheckSha(wc, dlg, delegate { FetchSources(wc, dlg, murls, mfile, msha != null); }, mfile, msha);
         }
     }
 
@@ -396,6 +519,10 @@ static class Dl
         Log("sha mismatch, retrying: " + file);
         dlg.SetInfo("SHA-256 校验失败，重新下载…");
         try { File.Delete(file); } catch { }
+        // start the retry from scratch: resuming the very bytes that just failed
+        // (a mirror that serves something else, a splice across two hosts) cannot
+        // come out right the second time
+        try { File.Delete(file + ".part"); } catch { }
         download();
         if (!Verify(file, sha))
             throw new InvalidOperationException("SHA-256 校验失败，文件可能损坏或被篡改：\n"
@@ -459,42 +586,22 @@ static class Dl
         try { Directory.Delete(src, true); } catch { }
     }
 
-    // download with optional proxy retry; progress shown via dlg
-    static void Fetch(WebClient wc, Dlg dlg, string url, string file, string proxyPrefix)
+    // Finished downloads and extraction dirs go, but a half-file stays: the next run
+    // of the installer resumes it with a Range request instead of paying for a
+    // several-hundred-megabyte transfer twice after one dropped connection.
+    static void CleanTmp(string tmp)
     {
-        try
-        {
-            FetchOnce(wc, dlg, url, file);
-        }
-        catch (Exception e)
-        {
-            if (dlg.Cancelled) throw;
-            if (proxyPrefix == null) throw;
-            Log("direct failed (" + e.Message + "), retry via proxy");
-            dlg.SetInfo("直连失败，改用代理重试…");
-            try { File.Delete(file + ".part"); } catch { }
-            FetchOnce(wc, dlg, proxyPrefix + url, file);
-        }
-    }
-
-    static void FetchAny(WebClient wc, Dlg dlg, string[] urls, string file)
-    {
-        Exception last = null;
-        foreach (var u in urls)
-        {
-            try { FetchOnce(wc, dlg, u, file); return; }
-            catch (Exception e)
-            {
-                if (dlg.Cancelled) throw;
-                last = e;
-                Log("url failed " + u + " : " + e.Message);
-            }
-        }
-        throw last ?? new InvalidOperationException("所有下载源均失败: " + file);
+        foreach (var f in Directory.GetFiles(tmp, "*", SearchOption.AllDirectories))
+            if (!f.EndsWith(".part", StringComparison.OrdinalIgnoreCase))
+            { try { File.Delete(f); } catch { } }
+        foreach (var d in Directory.GetDirectories(tmp))
+        { try { Directory.Delete(d, true); } catch { } }
     }
 
     // Manual redirect following: WebClient/HttpWebRequest on .NET Framework do NOT
-    // auto-follow 307/308, and hf-mirror answers /resolve/ with 308.
+    // auto-follow 307/308, and hf-mirror answers /resolve/ with 308. A leftover
+    // .part is resumed with a Range request, and a link that has effectively stalled
+    // is abandoned so the next source gets a chance instead of hanging for hours.
     static void FetchOnce(WebClient wc, Dlg dlg, string url, string file)
     {
         dlg.SetInfo("下载 " + Path.GetFileName(file) + " …");
@@ -505,11 +612,16 @@ static class Dl
             HttpWebResponse resp = null;
             try
             {
+                string part = file + ".part";
+                long start = 0;
+                try { if (File.Exists(part)) start = new FileInfo(part).Length; } catch { }
+
                 var req = (HttpWebRequest)WebRequest.Create(url);
                 req.UserAgent = "crispasr-potplayer-setup";
                 req.AllowAutoRedirect = false;
                 req.Timeout = 30000;
                 req.ReadWriteTimeout = 120000;
+                if (start > 0) req.AddRange(start);
                 try { resp = (HttpWebResponse)req.GetResponse(); }
                 catch (WebException we)
                 {
@@ -528,39 +640,70 @@ static class Dl
                     Log("follow redirect " + code + " -> " + url);
                     continue;
                 }
+                if (code == 416 && start > 0)      // .part no longer applies: start over
+                {
+                    resp.Close();
+                    try { File.Delete(part); } catch { }
+                    Log("range rejected by " + HostOf(url) + ", restarting");
+                    continue;
+                }
                 if (code >= 400) throw new InvalidOperationException("HTTP " + code + ": " + url);
 
-                long total = resp.ContentLength;
-                string part = file + ".part";
+                bool resumed = code == 206 && start > 0;
+                long body = resp.ContentLength;
+                long total = resumed && body > 0 ? start + body : body;
+                if (resumed) dlg.SetInfo("续传 " + Path.GetFileName(file) + "，已有 " + (start / 1048576) + " MB…");
+                Log((resumed ? "resume " : "fresh ") + Path.GetFileName(file) + " from " + HostOf(url));
+
+                double stalled = -1;
                 using (var input = resp.GetResponseStream())
-                using (var output = new FileStream(part, FileMode.Create, FileAccess.Write, FileShare.None))
+                using (var output = new FileStream(part, resumed ? FileMode.Append : FileMode.Create,
+                                                   FileAccess.Write, FileShare.None))
                 {
                     var buf = new byte[81920];
-                    long received = 0;
+                    long received = resumed ? start : 0;
                     int n;
                     DateTime lastTick = DateTime.MinValue;
+                    DateTime begin = DateTime.Now, mark = begin;
+                    long markBytes = received;
                     while ((n = input.Read(buf, 0, buf.Length)) > 0)
                     {
                         output.Write(buf, 0, n);
                         received += n;
                         DateTime now = DateTime.Now;
-                        if ((now - lastTick).Milliseconds >= 50)
+                        if ((now - lastTick).Milliseconds >= 200)
                         {
                             lastTick = now;
+                            double secs = (now - mark).TotalSeconds;
+                            double speed = secs > 0.2 ? (received - markBytes) / secs : 0;
+                            if (secs >= 15) { mark = now; markBytes = received; }
+                            string extra = total > 0
+                                ? (received / 1048576) + " / " + (total / 1048576) + " MB"
+                                : (received / 1048576) + " MB";
+                            if (received > 1048576 && speed > 0) extra += "  " + FmtSpeed(speed) + "/s";
+                            dlg.SetInfo("下载 " + Path.GetFileName(file) + "  " + extra);
                             if (total > 0)
                             {
                                 try { dlg.Bar.Value = (int)Math.Min(100, received * 100 / total); } catch { }
-                                dlg.SetInfo("下载 " + Path.GetFileName(file) + "  "
-                                    + (received / 1048576) + " / " + (total / 1048576) + " MB");
                             }
-                            else dlg.SetInfo("下载 " + Path.GetFileName(file) + "  " + (received / 1048576) + " MB");
                             Application.DoEvents();
                             if (dlg.Cancelled) { try { resp.Close(); } catch { } break; }
+                            // a pinned-size file that is not moving is a dead source, not
+                            // a slow one; keep the .part so a retry can pick it up again
+                            if (secs >= 15 && (now - begin).TotalSeconds > 30 && speed < 10240)
+                            {
+                                stalled = speed;
+                                try { resp.Close(); } catch { }
+                                break;
+                            }
                         }
                     }
                 }
                 resp.Close();
                 if (dlg.Cancelled) throw new Cancelled();
+                if (stalled >= 0)
+                    throw new InvalidOperationException("下载太慢（" + FmtSpeed(stalled) + "/s），已放弃该源："
+                        + HostOf(url) + "。可稍后重试，或按 README 手动下载后重跑安装器。");
                 if (!File.Exists(part) || new FileInfo(part).Length == 0)
                     throw new InvalidOperationException("下载未完成: " + url);
                 if (File.Exists(file)) File.Delete(file);
@@ -573,6 +716,18 @@ static class Dl
             }
         }
         throw new InvalidOperationException("重定向次数过多: " + file);
+    }
+
+    static string HostOf(string url)
+    {
+        try { return new Uri(url).Host; } catch { return url; }
+    }
+
+    static string FmtSpeed(double bps)
+    {
+        if (bps >= 1048576) return (bps / 1048576).ToString("0.0") + " MB";
+        if (bps >= 1024) return (bps / 1024).ToString("0") + " KB";
+        return (int)bps + " B";
     }
 
     class Dlg : Form
