@@ -25,6 +25,7 @@ nogpu=0
 ; 1 = 转录前先用 mel-band-roformer 分离人声（抗 BGM/OP，代价：慢一些、占临时盘）。
 ; 需要分离模型与 ffmpeg（ffmpeg 用于把音频重采样成分离模型要求的 44.1 kHz 立体声）。
 ; 缺模型或找不到 ffmpeg 时自动跳过分离、直接转录原始音频，不会报错。
+; 安装器里勾选"启用人声分离"会把本项写成 1（并连带下载 ffmpeg）；默认 0。
 vocals=0
 
 ; 分离模型 GGUF 路径；留空则自动探测同目录 CrispASR\models\mel-band-roformer-vocals-f16.gguf。

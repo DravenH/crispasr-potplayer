@@ -5,6 +5,7 @@
 // GUI double-click flow, plus silent CLI:
 //   Setup.exe ["X:\PotPlayer"] /quiet [/download] [/build:cpu|cuda|cuda13|vulkan]
 //             [/model:f16] [/only:crisp,model,ffmpeg,sep] [/version:v0.8.37|latest] [/sep]
+// /sep (人声分离) 默认关；勾选/传入后会连带下载 ffmpeg 并把 shim.ini 的 vocals 写成 1。
 // Downloads default to the hash-pinned release; /version: opts out of that pin.
 // Exit codes: 0 ok, 2 PotPlayer not found, 3 write failed, 4 download failed.
 using System;
@@ -99,7 +100,7 @@ static class Installer
                 PickComponents(quiet, buildOverride, modelOverride, only, versionOverride, sepFlag,
                                out build, out model, out ff, out sep, out version);
                 Dl.Run(engDir, build, model, ff, sep, only, version);
-                UpdateIniAfterDownload(iniPath, engDir);
+                UpdateIniAfterDownload(iniPath, engDir, sep);
                 didDownload = true;
             }
         }
@@ -354,7 +355,7 @@ static class Installer
         return null;
     }
 
-    static void UpdateIniAfterDownload(string iniPath, string engDir)
+    static void UpdateIniAfterDownload(string iniPath, string engDir, bool sep)
     {
         try
         {
@@ -366,6 +367,9 @@ static class Installer
             if (model != null) text = ReplaceKey(text, "model", model);
             string ffdir = Path.Combine(engDir, "ffmpeg");
             if (File.Exists(Path.Combine(ffdir, "ffmpeg.exe"))) text = ReplaceKey(text, "ffmpeg_dir", ffdir);
+            // enable only on an explicit "yes" in this run — never silently switch a
+            // user's own vocals=1 back off on re-install
+            if (sep) text = ReplaceKey(text, "vocals", "1");
             File.WriteAllText(iniPath, text, new UTF8Encoding(false));
         }
         catch (Exception e) { Log("ini update failed: " + e.Message); }
@@ -465,7 +469,7 @@ static class Installer
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false; MinimizeBox = false;
             StartPosition = FormStartPosition.CenterScreen;
-            ClientSize = new Size(560, 456);
+            ClientSize = new Size(560, 494);
             Font = new Font("Microsoft YaHei UI", 9f);
 
             var gpu = new Label();
@@ -512,18 +516,30 @@ static class Installer
             Controls.Add(ffBox);
 
             sepBox = new CheckBox();
-            sepBox.Text = "下载人声分离模型（可选 ≈436 MB）— vocals=1 时抗 BGM";
-            sepBox.SetBounds(14, 378, 418, 22);
-            sepBox.CheckedChanged += delegate { Sep = sepBox.Checked; };
+            sepBox.Text = "启用人声分离（默认关闭）— 下载分离模型 ≈436 MB，并自动附带 ffmpeg";
+            sepBox.SetBounds(14, 378, 536, 22);
+            sepBox.CheckedChanged += delegate
+            {
+                Sep = sepBox.Checked;
+                if (sepBox.Checked) { ffBox.Checked = true; ffBox.Enabled = false; }
+                else ffBox.Enabled = true;
+            };
             Controls.Add(sepBox);
+
+            var tip2 = new Label();
+            tip2.SetBounds(14, 404, 536, 36);
+            tip2.ForeColor = Color.Gray;
+            tip2.Text = "开启后 PotPlayer 转写前先分离人声，整体耗时约 3 倍（实测 60 秒音频 2.4s → 7.2s），清晰对白"
+                      + "素材提升不明显；勾选会在 shim.ini 写入 vocals=1。";
+            Controls.Add(tip2);
 
             var ok = new Button();
             ok.Text = "开始下载";
-            ok.SetBounds(330, 412, 100, 32);
+            ok.SetBounds(330, 450, 100, 32);
             ok.DialogResult = DialogResult.OK;
             var cancel = new Button();
             cancel.Text = "跳过下载";
-            cancel.SetBounds(440, 388, 100, 32);
+            cancel.SetBounds(440, 450, 100, 32);
             cancel.DialogResult = DialogResult.Cancel;
             Controls.Add(ok); Controls.Add(cancel);
             AcceptButton = ok; CancelButton = cancel;
@@ -532,10 +548,12 @@ static class Installer
             buildRadios.TryGetValue(suggestBuild, out pre);
             if (pre != null) pre.Checked = true; else buildRadios["cpu"].Checked = true;
             if (suggestModel == ModelF16) f16.Checked = true; else q8.Checked = true;
-            ffBox.Checked = suggestFf;
+            ffBox.Checked = suggestFf || suggestSep;   // separation needs ffmpeg to resample
+            ffBox.Enabled = !suggestSep;
             sepBox.Checked = suggestSep;
 
-            SelectedBuild = suggestBuild; SelectedModel = suggestModel; Ffmpeg = suggestFf; Sep = suggestSep;
+            SelectedBuild = suggestBuild; SelectedModel = suggestModel;
+            Ffmpeg = suggestFf || suggestSep; Sep = suggestSep;
             Latest = false;
         }
 

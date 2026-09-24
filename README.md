@@ -87,7 +87,7 @@ crispasr -m <model.gguf> -f <audio> -l ja --vad -osrt -of <out>\<base> --split-o
   | CrispASR CPU 版（含 legacy） | 无独显；legacy 供不支持 AVX2 的老 CPU |
   | 模型 q8_0 ≈642MB（推荐）/ f16 ≈1190MB | 精度几乎无差别，q8_0 加载更快 |
   | ffmpeg ≈115MB（可选勾选） | crispasr 内置解码失败时的兜底解码器；仅 PotPlayer 内用可不装 |
-  | 人声分离模型 ≈436MB（可选勾选） | `shim.ini` 设 `vocals=1` 时的抗 BGM 前置，见"人声分离" |
+  | 启用人声分离（默认关闭，≈436MB） | 抗 BGM 前置；勾选会连带下载 ffmpeg，并在 `shim.ini` 写入 `vocals=1`，见"人声分离" |
   默认**只下载已验证固定的上游版本 v0.8.36**，下载完逐个核对内置 SHA-256
   （不匹配会重试一次后报错，绝不解压安装），**不会自动跟随“最新版”**；
   确需升级时在弹框勾选“检查最新版”（此路径不校验哈希）或用 `/version:<tag>` 指定；
@@ -100,8 +100,8 @@ crispasr -m <model.gguf> -f <audio> -l ja --vad -osrt -of <out>\<base> --split-o
   CrispASR-PotPlayer-Setup.exe /quiet "X:\Path\To\PotPlayer"                :: 只装垫片
   CrispASR-PotPlayer-Setup.exe /quiet "X:\..." /download                     :: 按显卡自动选版下载组件
   ... /download /build:cuda13 /model:f16                                     :: 指定版本（可加 /only:crisp+model）
-  ... /download /sep                                                         :: 额外下载人声分离模型
-  ... /download /only:crisp,model,sep,ffmpeg                                 :: 只下其中几项
+  ... /download /sep                                                         :: 人声分离：连带下载 ffmpeg 并写入 vocals=1
+  ... /download /only:crisp,model,sep,ffmpeg                                 :: 只下其中几项（sep 仍会自动带上 ffmpeg）
   ... /download /version:latest                                              :: 显式跟最新版（跳过哈希校验）
   ```
 
@@ -165,6 +165,9 @@ PotPlayer 播放影片 → 右键菜单 / 字幕菜单 → **声音生成字幕*
 
 - 需要分离模型（≈436 MB）**和 ffmpeg**；缺任一个都不会报错，垫片会跳过分离直接识别，
   日志里写明跳过原因（`vocals=1 but separation model not found` / `no ffmpeg`）。
+  安装器里这两者是绑定的：勾选"启用人声分离"会自动带上 ffmpeg（该项同时被锁定），
+  下载完成后把 `shim.ini` 的 `vocals` 写成 `1`；不勾选则默认 `0`，也不会去动你
+  自己改过的开关。
 - 慢：60 秒素材不分离 2.4 s 出字幕，分离后 7.2 s（分离本身约 4.4 s，主要是模型加载）。
   时长比例约等于"总耗时 ×3"，所以日常生肉追新番不建议常开。
 - 多占临时盘：`%TEMP%\crispasr-voc-<时间戳>\` 下多一份 44.1 kHz 立体声原轨与人声轨，

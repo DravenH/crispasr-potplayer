@@ -75,7 +75,9 @@ static class Dl
         bool wantCrisp = only == null || only.Contains("crisp");
         bool wantModel = only == null || only.Contains("model");
         bool wantSep = only == null ? sep : only.Contains("sep"); // listing it in /only: requests it
-        bool wantFf = only == null ? wantFfmpeg : wantFfmpeg && only.Contains("ffmpeg");
+        // the vocals pre-pass resamples PotPlayer's 16k mono dump to 44.1k stereo, so
+        // separation cannot run without ffmpeg even when /only: left it out
+        bool wantFf = (only == null ? wantFfmpeg : only.Contains("ffmpeg")) || wantSep;
 
         var dlg = new Dlg();
         bool headless = only != null; // /only: scripted -> no progress window
