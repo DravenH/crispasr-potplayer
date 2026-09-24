@@ -83,7 +83,9 @@ crispasr -m <model.gguf> -f <audio> -l ja --vad -osrt -of <out>\<base> --split-o
     任何哈希表都会很快过期并误判；"不是我们的就备份"是唯一可判定的安全规则
   - 已装有自己配置过的旧版垫片时**覆盖 exe、保留你的 shim.ini**（其余情况 shim.ini 重新生成）
 - 新生成的 `shim.ini` **按你选择的安装目录自动写好组件路径**（默认指向
-  `Engine\Whisper-Faster\CrispASR\`），全程无需手动编辑配置文件
+  `Engine\Whisper-Faster\CrispASR\`），全程无需手动编辑配置文件；
+  此时还没放模型的话该项**留空**（= 垫片自己探测），模型下载好或放到位后
+  重跑一次安装器就会填上
 - 未检测到 CrispASR 时可**自动下载全部组件**：安装器会用 `nvidia-smi` 读取显卡
   计算能力并预选版本，弹框里可手动改：
   | 选项 | 提示 |
@@ -101,6 +103,16 @@ crispasr -m <model.gguf> -f <audio> -l ja --vad -osrt -of <out>\<base> --split-o
   直连失败走 `gh-proxy.org`，模型走 hf-mirror → huggingface 回退，
   落盘到 `<PotPlayer>\Engine\Whisper-Faster\CrispASR\`，并自动写入 `shim.ini`
 - PotPlayer 装在 `Program Files` 等受保护目录时，请右键 → **以管理员身份运行**
+- **重跑安装器 = 修复**：运行时 / 模型 / `shim.ini` 三件事**每次运行都各自独立检查**，
+  互不遮蔽（不会因为 CrispASR 版本正确就跳过后面两步）：
+  - 组件"是否已就位"按**实测**判定——先比大小、再核内置 SHA-256，不是看目录非空；
+    已就位的绝不重复下载，只下载真正缺的那几项（弹窗与日志都会列出缺什么）
+  - 误删模型、把 `CrispASR\models\` 改名、`shim.ini` 里的路径挪动过，重跑一次即可修好：
+    `shim.ini` **只重写已经失效的键**（指向不存在的路径）并重新自动探测，
+    能用的路径——包括你指向别处的自定义路径——**逐字节保留**，绝盖手写配置
+  - 需要连已通过校验的组件一起重装时加 `/force`
+    （图形界面里对应"重新下载 CrispASR 运行时"勾选框，只在检测到已有运行时时出现）
+  - 下载失败/取消**不影响** `shim.ini` 这一步：两者分开做，修复始终会跑
 - 也支持静默安装（脚本/无人值守）：
 
   ```
@@ -111,9 +123,11 @@ crispasr -m <model.gguf> -f <audio> -l ja --vad -osrt -of <out>\<base> --split-o
   ... /sep                                                                   :: 组件已装好时单独打开 vocals=1（不下载任何东西）
   ... /download /only:crisp,model,sep,ffmpeg                                 :: 只下其中几项（sep 仍会自动带上 ffmpeg）
   ... /download /version:latest                                              :: 显式跟最新版（跳过哈希校验）
+  ... /download /force                                                       :: 连已通过校验的组件也重装
   ```
 
-  退出码：0 成功 / 2 未找到 PotPlayer / 3 写入失败 / 4 下载失败（含中途取消）
+  退出码：0 成功（含"取消/跳过下载"——垫片本身已装好）/ 2 未找到 PotPlayer /
+  3 写入失败 / 4 组件下载失败
 
 **方式二：手动** —— 把 `bin\whisper-faster.exe` 放进 `<PotPlayer>\Engine\Whisper-Faster\`，
 并把下载好的 CrispASR 放在同目录 `CrispASR\` 子目录（即 `CrispASR\crispasr.exe`、
@@ -204,6 +218,9 @@ PotPlayer 播放影片 → 右键菜单 / 字幕菜单 → **声音生成字幕*
 安装器生成的 `shim.ini` 已按所选安装目录写好 `crispasr` / `model` 绝对路径；
 手动部署时若目录结构与安装器一致（`CrispASR\` + `CrispASR\models\`），
 **连 shim.ini 都可以不放**，垫片会按上表默认自动探测。
+`model` / `separation_model` 即使写了路径，**文件被删/改名导致路径失效时也会回退到上表的自动探测**
+（日志里会写明"configured model missing, searching again"）；`crispasr` 路径失效则直接报错退出 2。
+这些失效路径重跑一次安装器就会按实测重写。
 
 ## 故障排查
 
@@ -220,6 +237,9 @@ PotPlayer 播放影片 → 右键菜单 / 字幕菜单 → **声音生成字幕*
 - `exit=20`：多为语言名不被 crispasr 接受；垫片会把 `Japanese/中文/...` 全名映射为 ISO 码。
 - 换其他语言/模型：改 `shim.ini` 的 `model` 与 `language` 即可（任何 crispasr 支持的 GGUF 都行），
   未知语言全名当前兜底为 `ja`，见 `src\XxlShim.cs` 的 `LangMap`。
+- 组件路径失效（`shim: crispasr not found: <路径>` 退出码 2，或 crispasr 直接报模型文件读不到）：
+  组件被移动/改名、或误删了 `CrispASR\models\*.gguf`。**重跑一次安装器**即可：
+  它会按实测重建失效的键、只补真正缺的组件，其余配置原样保留（见"安装"一节的"重跑=修复"）。
 
 ## 独立批量转录（不依赖 PotPlayer）
 
