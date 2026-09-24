@@ -18,6 +18,11 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Forms;
 
+// The four pieces the installer deals with. Each is probed and downloaded on its
+// own, so a healthy runtime never masks a deleted model (and vice versa).
+[Flags]
+enum Comp { None = 0, Crisp = 1, Model = 2, Sep = 4, Ffmpeg = 8 }
+
 static class Dl
 {
     const string ReleasesApi = "https://api.github.com/repos/CrispStrobe/CrispASR/releases?per_page=15";
@@ -68,19 +73,42 @@ static class Dl
     // file name the shim auto-detects for its opt-in vocals=1 pre-pass
     public const string SepModel = "mel-band-roformer-vocals-f16.gguf";
 
+    static readonly Dictionary<string, bool> GgufProbeCache =
+        new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+
+    // Is this path a usable GGUF? The pinned size is checked first (a truncated or
+    // half-finished file fails there), then the compiled-in LFS oid. File names we
+    // have no hash for -- the user's own models -- only get a size sanity check.
+    // Results are cached because the installer probes the same 600 MB files
+    // repeatedly while narrowing down what is missing.
+    public static bool GgufOk(string path)
+    {
+        if (string.IsNullOrEmpty(path)) return false;
+        bool yes;
+        lock (GgufProbeCache) if (GgufProbeCache.TryGetValue(path, out yes)) return yes;
+        try
+        {
+            if (!File.Exists(path)) return false;
+            string name = Path.GetFileName(path);
+            string sha;
+            ModelSha.TryGetValue(name, out sha);
+            long pinned;
+            yes = ModelSize.TryGetValue(name, out pinned)
+                ? new FileInfo(path).Length == pinned
+                : new FileInfo(path).Length > 100L * 1024 * 1024;
+            if (yes) yes = Verify(path, sha);
+        }
+        catch (Exception e) { Log("probe failed " + path + " : " + e.Message); yes = false; }
+        lock (GgufProbeCache) GgufProbeCache[path] = yes;
+        return yes;
+    }
+
     // version: null -> PinnedTag (hash-verified), "latest" -> newest release,
     // any other value -> that exact upstream tag (verified only when it is PinnedTag).
-    public static void Run(string engDir, string build, string model, bool wantFfmpeg, bool sep, string only, string version)
+    // want lists which pieces to install; force re-downloads even intact ones.
+    public static void Run(string engDir, string build, string model, Comp want, bool force, bool headless, string version)
     {
-        bool wantCrisp = only == null || only.Contains("crisp");
-        bool wantModel = only == null || only.Contains("model");
-        bool wantSep = only == null ? sep : only.Contains("sep"); // listing it in /only: requests it
-        // the vocals pre-pass resamples PotPlayer's 16k mono dump to 44.1k stereo, so
-        // separation cannot run without ffmpeg even when /only: left it out
-        bool wantFf = (only == null ? wantFfmpeg : only.Contains("ffmpeg")) || wantSep;
-
         var dlg = new Dlg();
-        bool headless = only != null; // /only: scripted -> no progress window
         if (!headless) { dlg.Show(); Application.DoEvents(); }
 
         string tmp = Path.Combine(Path.GetTempPath(), "crispasr-dl-" + DateTime.Now.ToString("HHmmss"));
@@ -89,15 +117,15 @@ static class Dl
         var done = new List<string>();
         try
         {
-            if (wantCrisp)
+            if ((want & Comp.Crisp) != 0)
             {
                 string what = "CrispASR 运行时（" + build + " 版）";
                 Step(what, delegate { GetRuntime(wc, dlg, engDir, tmp, build, version, headless); });
                 done.Add(what);
             }
-            if (wantModel) { GetModel(wc, dlg, engDir, model); done.Add("模型 " + model); }
-            if (wantSep) { GetModel(wc, dlg, engDir, SepModel); done.Add("模型 " + SepModel); }
-            if (wantFf)
+            if ((want & Comp.Model) != 0) { GetModel(wc, dlg, engDir, model, force); done.Add("模型 " + model); }
+            if ((want & Comp.Sep) != 0) { GetModel(wc, dlg, engDir, SepModel, force); done.Add("模型 " + SepModel); }
+            if ((want & Comp.Ffmpeg) != 0)
             {
                 Step("ffmpeg", delegate { GetFfmpeg(wc, dlg, engDir, tmp); });
                 done.Add("ffmpeg");
@@ -228,32 +256,25 @@ static class Dl
     }
 
     // Fetch one GGUF into <engDir>\CrispASR\models\ unless an intact copy is
-    // already there (size check first, then the pinned LFS oid).
-    static void GetModel(WebClient wc, Dlg dlg, string engDir, string model)
+    // already there; force (from /force) reinstalls even a good file.
+    static void GetModel(WebClient wc, Dlg dlg, string engDir, string model, bool force)
     {
-        Step("模型 " + model, delegate { FetchModel(wc, dlg, engDir, model); });
+        Step("模型 " + model, delegate { FetchModel(wc, dlg, engDir, model, force); });
     }
 
-    static void FetchModel(WebClient wc, Dlg dlg, string engDir, string model)
+    static void FetchModel(WebClient wc, Dlg dlg, string engDir, string model, bool force)
     {
         string mdir = Path.Combine(Path.Combine(engDir, "CrispASR"), "models");
         Directory.CreateDirectory(mdir);
         string mfile = Path.Combine(mdir, model);
-        string msha; ModelSha.TryGetValue(model, out msha);
-        long msize; ModelSize.TryGetValue(model, out msize);
-        bool have = false;
-        if (File.Exists(mfile))
+        string msha;
+        ModelSha.TryGetValue(model, out msha);
+        if (force && File.Exists(mfile))
         {
-            have = msize > 0 ? new FileInfo(mfile).Length == msize
-                             : new FileInfo(mfile).Length > 100L * 1024 * 1024;
-            if (have)
-            {
-                dlg.SetInfo("校验已有模型 " + model + " …");
-                have = Verify(mfile, msha);   // unknown model name -> no hash -> keep it
-                if (!have) dlg.SetInfo("已有模型校验不过，重新下载…");
-            }
+            dlg.SetInfo("按 /force 重装，删除已有 " + model + " …");
+            try { File.Delete(mfile); } catch { }
         }
-        if (have)
+        if (!force && GgufOk(mfile))
             dlg.SetInfo("模型已存在且校验通过，跳过下载");
         else
         {

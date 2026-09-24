@@ -2,11 +2,18 @@
 // template) into <PotPlayer>\Engine\Whisper-Faster. Supports 32/64-bit PotPlayer.
 // Optionally auto-downloads runtime components (see Download.cs) after a version
 // picker dialog with GPU-aware hints.
+// The runtime, the model files and shim.ini are checked independently on every
+// run: re-running the installer repairs whatever went missing since (a deleted
+// model, a renamed folder, a stale ini path) without re-downloading what is fine.
 // GUI double-click flow, plus silent CLI:
 //   Setup.exe ["X:\PotPlayer"] /quiet [/download] [/build:cpu|cuda|cuda13|vulkan]
-//             [/model:f16] [/only:crisp,model,ffmpeg,sep] [/version:v0.8.37|latest] [/sep]
+//             [/model:f16] [/only:crisp,model,ffmpeg,sep] [/version:v0.8.37|latest]
+//             [/sep] [/force]
 // /sep (人声分离) 默认关；勾选/传入后会连带下载 ffmpeg 并把 shim.ini 的 vocals 写成 1。
+// /force 忽略"已装好就跳过"，强制重下请求到的每个组件。
 // Downloads default to the hash-pinned release; /version: opts out of that pin.
+// A deliberate skip/cancel is not an error: the shim is installed and shim.ini is
+// still repaired, so such a run exits 0.
 // Exit codes: 0 ok, 2 PotPlayer not found, 3 write failed, 4 download failed.
 using System;
 using System.Collections.Generic;
@@ -32,12 +39,13 @@ static class Installer
         try { Application.EnableVisualStyles(); } catch { }
 
         string dir = null, buildOverride = null, modelOverride = null, only = null, versionOverride = null;
-        bool quiet = false, downloadFlag = false, sepFlag = false;
+        bool quiet = false, downloadFlag = false, sepFlag = false, forceFlag = false;
         foreach (var a in args)
         {
             if (a.Equals("/quiet", StringComparison.OrdinalIgnoreCase) || a.Equals("/s", StringComparison.OrdinalIgnoreCase)) quiet = true;
             else if (a.Equals("/download", StringComparison.OrdinalIgnoreCase)) downloadFlag = true;
             else if (a.Equals("/sep", StringComparison.OrdinalIgnoreCase)) sepFlag = true;
+            else if (a.Equals("/force", StringComparison.OrdinalIgnoreCase)) forceFlag = true;
             else if (a.StartsWith("/build:", StringComparison.OrdinalIgnoreCase)) buildOverride = a.Substring(7).ToLowerInvariant();
             else if (a.StartsWith("/model:", StringComparison.OrdinalIgnoreCase)) modelOverride = a.Substring(7).ToLowerInvariant();
             else if (a.StartsWith("/only:", StringComparison.OrdinalIgnoreCase)) only = a.Substring(6).ToLowerInvariant();
@@ -80,44 +88,42 @@ static class Installer
             return 3;
         }
 
-        // ---- optional component download ----
+        // ---- what is actually missing, judged piece by piece ----
+        // The runtime, the speech model and (when vocals are on) the separation
+        // model + ffmpeg are probed separately, and shim.ini is repaired on its own
+        // afterwards: finding a working crispasr.exe must never skip the other two.
         string dlError = null;
         Exception dlEx = null;
-        string iniNote = null;
         bool didDownload = false;
+        var notes = new List<string>();
+        bool vocals1 = sepFlag;             // write vocals=1 for the /sep path
         try
         {
-            string crisp = ResolveCrispasr(iniPath, engDir);
-            bool missing = crisp == null;
+            Comp miss = Missing(engDir, iniPath, sepFlag);
+            Log("audit: missing = " + Describe(miss));
+
             bool wantDl;
             if (quiet) wantDl = downloadFlag;
             else if (downloadFlag) wantDl = true;
-            else wantDl = missing && AskYesNo("未检测到 CrispASR。是否自动下载所需组件？\n"
-                + "将写入 " + engDir + @"\CrispASR\（下一步可选择具体版本）。");
+            else if (miss == Comp.None) wantDl = false;
+            else wantDl = AskYesNo("检测到缺少以下组件：\n" + DescribeLines(miss)
+                + "\n是否自动下载？\n将写入 " + engDir + @"\CrispASR\（下一步可确认具体版本）。");
 
             if (wantDl)
             {
                 string build, model, version;
-                bool ff, sep;
-                PickComponents(quiet, buildOverride, modelOverride, only, versionOverride, sepFlag,
-                               out build, out model, out ff, out sep, out version);
-                Dl.Run(engDir, build, model, ff, sep, only, version);
-                didDownload = true;
-                if (!UpdateIniAfterDownload(iniPath, engDir, sep))
-                    iniNote = "组件已下载完成，但 shim.ini 更新失败，请查看日志：" + LogPath;
-            }
-            else if (sepFlag)
-            {
-                // /sep without a download run (components already present): the
-                // checkbox never appeared, so honour the flag where it lives -- shim.ini
-                string sepFile = Path.Combine(engDir, @"CrispASR\models\" + Dl.SepModel);
-                iniNote = !UpdateIniAfterDownload(iniPath, engDir, true)
-                    ? "/sep 未能写入 shim.ini（见日志），请手动把 vocals 改成 1"
-                    : File.Exists(sepFile)
-                        ? "已按 /sep 把 shim.ini 的 vocals 写成 1。"
-                        : "已按 /sep 把 vocals 写成 1，但目录里还没有分离模型 " + Dl.SepModel
-                          + "，运行时会跳过分离；补下：Setup.exe /quiet \"<PotPlayer 目录>\" /download /only:sep";
-                Log(iniNote);
+                Comp want = PickComponents(quiet, buildOverride, modelOverride, only, versionOverride,
+                                           sepFlag, forceFlag, engDir, iniPath,
+                                           out build, out model, out version, out vocals1);
+                if (want == Comp.None)
+                    notes.Add("所需组件都已在位并通过 SHA-256 校验，未重复下载。"
+                            + "确要重装请加 /force（或在下一屏勾选\"重新下载运行时\"）。");
+                else
+                {
+                    Log("download: " + Describe(want));
+                    Dl.Run(engDir, build, model, want, forceFlag, only != null, version);
+                    didDownload = true;
+                }
             }
         }
         catch (Exception e)
@@ -127,32 +133,57 @@ static class Installer
             Log("download failed: " + e);
         }
 
-        if (quiet) return dlError == null ? 0 : 4;
+        // The ini pass runs whatever happened to the download: it only points keys at
+        // files that exist right now, so skipping or failing a download still repairs a
+        // stale path that would make the shim exit 2.
+        try
+        {
+            string repaired = FixIni(iniPath, engDir, vocals1);
+            if (repaired == null)
+                notes.Add((didDownload ? "组件已下载完成，但 shim.ini 更新失败" : "shim.ini 检查失败")
+                    + "，请手动确认其中的路径（日志：" + LogPath + "）");
+            else if (repaired.Length > 0)
+                notes.Add("已修正 shim.ini 中失效的配置项：" + repaired + "。");
+        }
+        catch (Exception e)
+        {
+            Log("ini pass failed: " + e.Message);
+            notes.Add("shim.ini 检查失败，请手动确认其中的路径（日志：" + LogPath + "）");
+        }
+        // SepShortfall answers for itself: null unless vocals=1 is really set
+        string shortfall = SepShortfall(engDir, iniPath);
+        if (shortfall != null) notes.Add(shortfall);
+
+        // silent mode has no dialog to carry these, so the log is the record
+        foreach (var n in notes) Log("note: " + n);
+
+        if (quiet) return dlEx is Skipped || dlError == null ? 0 : 4;
         if (dlError != null)
         {
-            bool cancelled = Dl.WasCancelled(dlEx);
-            MessageBox.Show((cancelled ? "已取消下载（垫片本身已安装成功）：\n"
-                                       : "组件下载失败（垫片本身已安装成功）：\n")
-                + dlError
-                + "\n\n可参考 README 手动下载对应组件，放进目录后重跑安装器即可（已下好的会跳过）。"
+            bool skipped = dlEx is Skipped;               // the picker's 跳过下载 button
+            bool cancelled = !skipped && Dl.WasCancelled(dlEx);
+            MessageBox.Show((skipped ? "已跳过下载（垫片本身已安装成功）。"
+                          : (cancelled ? "已取消下载（垫片本身已安装成功）：\n" : "组件下载失败（垫片本身已安装成功）：\n")
+                             + dlError + "。")
+                + "\n\n可参考 README 手动下载对应组件，放进目录后重跑安装器即可（只补真正缺的那部分）。"
                 + "\n详细日志：" + LogPath,
                 "CrispASR for PotPlayer", MessageBoxButtons.OK,
-                cancelled ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
+                skipped || cancelled ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
         }
 
+        Comp still = Missing(engDir, iniPath, sepFlag);
         string tail = didDownload ? "\n组件已下载完成，shim.ini 路径已按安装目录自动配置。"
-            : (File.Exists(Path.Combine(engDir, @"CrispASR\crispasr.exe"))
-                ? "\n已检测到 CrispASR，shim.ini 路径已自动配置。"
-                : "\nshim.ini 已按安装目录预置组件路径：" + engDir + "\\CrispASR\\"
-                  + "\n稍后把 CrispASR（含 models 目录里的模型）放进该目录即可直接使用，无需再改配置。");
+            : (still == Comp.None
+                ? "\n各组件均已就位（已逐项核对），本次未下载。"
+                : "\n仍未就绪：" + Describe(still) + "。\n放进 " + engDir + @"\CrispASR\ 或重跑本安装器下载即可，shim.ini 无需手改。");
         if (res != null && res.BackupNote != null)
             tail += "\n" + res.BackupNote + "，把它改回 whisper-faster.exe 即可还原官方引擎。";
-        if (iniNote != null) tail += "\n" + iniNote;
+        foreach (var n in notes) tail += "\n" + n;
         MessageBox.Show(
             "安装完成：\n" + Path.Combine(engDir, "whisper-faster.exe") + tail
             + "\n\n重启 PotPlayer 后，在『声音生成字幕』引擎下拉选 Whisper-Faster 即可。",
             "CrispASR for PotPlayer", MessageBoxButtons.OK, MessageBoxIcon.Information);
-        return dlError == null ? 0 : 4;
+        return dlEx is Skipped || dlError == null ? 0 : 4;
     }
 
     static bool AskYesNo(string text)
@@ -335,9 +366,10 @@ static class Installer
         string crisp = AutoFindCrispasr(dst);
         if (crisp != null)
         {
-            string model = AutoFindModel(crisp);
+            // an empty key is what makes the shim search on its own; leaving the
+            // template's example path behind would instead fail on a dead path
             tpl = ReplaceKey(tpl, "crispasr", crisp);
-            if (model != null) tpl = ReplaceKey(tpl, "model", model);
+            tpl = ReplaceKey(tpl, "model", AutoFindModel(Path.GetDirectoryName(crisp)) ?? "");
         }
         else
         {
@@ -352,6 +384,11 @@ static class Installer
         File.WriteAllText(iniPath, tpl, new UTF8Encoding(false));
         r.IniWritten = true;
         return r;
+    }
+
+    class Skipped : Exception          // the picker's 跳过下载 button: a deliberate no
+    {
+        public Skipped() : base("已跳过下载") { }
     }
 
     class InstallRes
@@ -388,20 +425,144 @@ static class Installer
     // crispasr from shim.ini (when that path exists), else common locations
     static string ResolveCrispasr(string iniPath, string engDir)
     {
-        try
-        {
-            foreach (var line in File.ReadAllLines(iniPath, Encoding.UTF8))
-            {
-                int i = line.IndexOf('=');
-                if (i > 0 && line.Substring(0, i).Trim().Equals("crispasr", StringComparison.OrdinalIgnoreCase))
-                {
-                    string v = line.Substring(i + 1).Trim();
-                    if (v.Length > 0 && File.Exists(v)) return v;
-                }
-            }
-        }
-        catch { }
+        string v = IniVal(ReadIni(iniPath), "crispasr");
+        if (v.Length > 0 && File.Exists(v)) return v;
         return AutoFindCrispasr(engDir);
+    }
+
+    static string ReadIni(string iniPath)
+    {
+        try { return File.ReadAllText(iniPath, Encoding.UTF8); }
+        catch { return ""; }
+    }
+
+    // same key=value lookup the shim itself uses (no inline comments: the shim
+    // takes everything after '=' as the value)
+    static string IniVal(string text, string key)
+    {
+        foreach (var line in text.Split('\n'))
+        {
+            int i = line.IndexOf('=');
+            if (i > 0 && line.Substring(0, i).Trim().Equals(key, StringComparison.OrdinalIgnoreCase))
+                return line.Substring(i + 1).Trim();
+        }
+        return "";
+    }
+
+    static string ModelDir(string engDir) { return Path.Combine(Path.Combine(engDir, "CrispASR"), "models"); }
+    static string SepPath(string engDir) { return Path.Combine(ModelDir(engDir), Dl.SepModel); }
+
+    static string CrispHome(string iniPath, string engDir)
+    {
+        string c = ResolveCrispasr(iniPath, engDir);
+        return c == null ? null : Path.GetDirectoryName(c);
+    }
+
+    // ---- per-piece probes: each component answers for itself ----
+    static bool CrispOk(string iniPath, string engDir) { return ResolveCrispasr(iniPath, engDir) != null; }
+
+    // the exact quant the download step would fetch, where it would land (or where
+    // shim.ini already points at it)
+    static bool ModelOk(string iniPath, string engDir, string model)
+    {
+        string p = IniVal(ReadIni(iniPath), "model");
+        if (Path.GetFileName(p).Equals(model, StringComparison.OrdinalIgnoreCase) && Dl.GgufOk(p)) return true;
+        string home = CrispHome(iniPath, engDir);
+        if (home != null && Dl.GgufOk(Path.Combine(Path.Combine(home, "models"), model))) return true;
+        return Dl.GgufOk(Path.Combine(ModelDir(engDir), model));
+    }
+
+    // any usable speech model counts: the shim only needs one to run
+    static bool AnySpeechModelOk(string iniPath, string engDir)
+    {
+        if (Dl.GgufOk(IniVal(ReadIni(iniPath), "model"))) return true;
+        string home = CrispHome(iniPath, engDir);
+        return home != null && AutoFindModel(home) != null;
+    }
+
+    static bool FfmpegOk(string iniPath, string engDir)
+    {
+        return FindFfmpegDir(iniPath, engDir) != null;
+    }
+
+    // mirrors the shim's own lookup: ffmpeg_dir, the installer's ffmpeg\ folder, PATH
+    static string FindFfmpegDir(string iniPath, string engDir)
+    {
+        string d = IniVal(ReadIni(iniPath), "ffmpeg_dir");
+        if (HasExe(d, "ffmpeg.exe")) return d;
+        d = Path.Combine(engDir, "ffmpeg");
+        if (HasExe(d, "ffmpeg.exe")) return d;
+        foreach (var e in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(';'))
+        {
+            if (string.IsNullOrEmpty(e)) continue;
+            if (HasExe(e.Trim(), "ffmpeg.exe")) return e.Trim();
+        }
+        return null;
+    }
+
+    // shim.ini values are hand-edited and can hold characters Path.Combine rejects
+    // ('|', a stray tab from copy-pasting). A path we cannot even build is simply absent.
+    static bool HasExe(string dir, string exe)
+    {
+        if (string.IsNullOrEmpty(dir)) return false;
+        try { return File.Exists(Path.Combine(dir, exe)); }
+        catch { return false; }
+    }
+
+    static bool SepOk(string iniPath, string engDir)
+    {
+        string p = IniVal(ReadIni(iniPath), "separation_model");
+        return Dl.GgufOk(p) || Dl.GgufOk(SepPath(engDir));
+    }
+
+    // Which pieces are absent or damaged. vocals=1 (or /sep) drags in the separation
+    // model and ffmpeg; with vocals=0 neither is required, so neither is offered.
+    static Comp Missing(string engDir, string iniPath, bool sepFlag)
+    {
+        Comp c = Comp.None;
+        if (!CrispOk(iniPath, engDir)) c |= Comp.Crisp;
+        if (!AnySpeechModelOk(iniPath, engDir)) c |= Comp.Model;
+        if (sepFlag || IniVal(ReadIni(iniPath), "vocals") == "1")
+        {
+            if (!SepOk(iniPath, engDir)) c |= Comp.Sep;
+            if (!FfmpegOk(iniPath, engDir)) c |= Comp.Ffmpeg;
+        }
+        return c;
+    }
+
+    static string Describe(Comp c)
+    {
+        var l = new List<string>();
+        if ((c & Comp.Crisp) != 0) l.Add("CrispASR 运行时");
+        if ((c & Comp.Model) != 0) l.Add("日语模型 parakeet-tdt-0.6b-ja");
+        if ((c & Comp.Sep) != 0) l.Add("人声分离模型");
+        if ((c & Comp.Ffmpeg) != 0) l.Add("ffmpeg");
+        return string.Join("、", l.ToArray());
+    }
+
+    static string DescribeLines(Comp c)
+    {
+        var l = new List<string>();
+        if ((c & Comp.Crisp) != 0) l.Add("· CrispASR 运行时（≈100 MB）");
+        if ((c & Comp.Model) != 0) l.Add("· 日语模型 parakeet-tdt-0.6b-ja（q8_0 ≈642 MB）");
+        if ((c & Comp.Sep) != 0) l.Add("· 人声分离模型（≈436 MB）");
+        if ((c & Comp.Ffmpeg) != 0) l.Add("· ffmpeg（分离需要，≈115 MB）");
+        return string.Join("\n", l.ToArray()) + "\n";
+    }
+
+    // vocals=1 without the files it needs is not an error -- the shim just skips
+    // separation -- but the user should hear about it here rather than in a log.
+    static string SepShortfall(string engDir, string iniPath)
+    {
+        if (IniVal(ReadIni(iniPath), "vocals") != "1") return null;
+        Comp c = Comp.None;
+        if (!SepOk(iniPath, engDir)) c |= Comp.Sep;
+        if (!FfmpegOk(iniPath, engDir)) c |= Comp.Ffmpeg;
+        if (c == Comp.None) return null;
+        // /only:ffmpeg pulls just ffmpeg; /only:sep pulls the sep model plus its ffmpeg
+        string what = c == Comp.Ffmpeg ? "ffmpeg" : "sep";
+        return "注意：shim.ini 里 vocals=1，但缺少 " + Describe(c)
+            + "，运行时会跳过人声分离。补下：Setup.exe /quiet \"<PotPlayer 目录>\" /download /only:" + what;
     }
 
     static string AutoFindCrispasr(string engDir)
@@ -420,43 +581,82 @@ static class Installer
         return null;
     }
 
-    static string AutoFindModel(string crispasrPath)
+    // first intact speech model next to a crispasr install; `home` is that exe's folder
+    static string AutoFindModel(string home)
     {
-        string home = Path.GetDirectoryName(crispasrPath);
+        if (string.IsNullOrEmpty(home)) return null;
         string[] names = { ModelQ8, ModelF16 };
         foreach (var n in names)
         {
             string p = Path.Combine(Path.Combine(home, "models"), n);
-            if (File.Exists(p)) return p;
+            if (Dl.GgufOk(p)) return p;
             p = Path.Combine(home, n);
-            if (File.Exists(p)) return p;
+            if (Dl.GgufOk(p)) return p;
         }
         return null;
     }
 
-    // refresh the paths shim.ini points at after a download; returns false when
-    // shim.ini could not be read or written
-    static bool UpdateIniAfterDownload(string iniPath, string engDir, bool sep)
+    // shim.ini repair: touch ONLY keys whose configured path no longer resolves
+    // (deleted file, renamed folder, PotPlayer moved to another drive), and only when
+    // there is something real to point at instead. A live hand-edited path -- a model
+    // on another drive, CRISPASR_HOME -- is never rewritten, so re-running the
+    // installer can't clobber a working config. Returns the changed key names
+    // ("" when the file was already fine, null when it could not be read or written).
+    static string FixIni(string iniPath, string engDir, bool vocals1)
     {
-        try
+        string text;
+        try { text = File.ReadAllText(iniPath, Encoding.UTF8); }
+        catch (Exception e) { Log("ini repair: cannot read " + iniPath + " : " + e.Message); return null; }
+        var changed = new List<string>();
+
+        string crisp = IniVal(text, "crispasr");
+        string wantCrisp = File.Exists(crisp) ? crisp : AutoFindCrispasr(engDir);
+        if (wantCrisp != null && wantCrisp != crisp)
         {
-            string text = File.ReadAllText(iniPath, Encoding.UTF8);
-            string crisp = Path.Combine(Path.Combine(engDir, "CrispASR"), "crispasr.exe");
-            if (File.Exists(crisp))
-            {
-                text = ReplaceKey(text, "crispasr", crisp);
-                string model = AutoFindModel(crisp);
-                if (model != null) text = ReplaceKey(text, "model", model);
-                string ffdir = Path.Combine(engDir, "ffmpeg");
-                if (File.Exists(Path.Combine(ffdir, "ffmpeg.exe"))) text = ReplaceKey(text, "ffmpeg_dir", ffdir);
-            }
-            // enable only on an explicit "yes" in this run — never silently switch a
-            // user's own vocals=1 back off on re-install
-            if (sep) text = ReplaceKey(text, "vocals", "1");
-            File.WriteAllText(iniPath, text, new UTF8Encoding(false));
-            return true;
+            text = ReplaceKey(text, "crispasr", wantCrisp);
+            changed.Add("crispasr");
+            crisp = wantCrisp;
         }
-        catch (Exception e) { Log("ini update failed: " + e.Message); return false; }
+        if (crisp.Length > 0)
+        {
+            string m = IniVal(text, "model");
+            string wantM = Dl.GgufOk(m) ? m : AutoFindModel(Path.GetDirectoryName(crisp));
+            if (wantM != null && wantM != m)
+            {
+                text = ReplaceKey(text, "model", wantM);
+                changed.Add("model");
+            }
+        }
+
+        string sep = IniVal(text, "separation_model");
+        if (sep.Length > 0 && !Dl.GgufOk(sep))
+        {
+            string sp = SepPath(engDir);
+            text = ReplaceKey(text, "separation_model", Dl.GgufOk(sp) ? sp : "");
+            changed.Add("separation_model");
+        }
+
+        string ffdir = IniVal(text, "ffmpeg_dir");
+        if (ffdir.Length > 0 && !HasExe(ffdir, "ffmpeg.exe"))
+        {
+            string cand = Path.Combine(engDir, "ffmpeg");
+            text = ReplaceKey(text, "ffmpeg_dir", HasExe(cand, "ffmpeg.exe") ? cand : "");
+            changed.Add("ffmpeg_dir");
+        }
+
+        // vocals is latched on by this run's own choice only -- never switched back off
+        if (vocals1 && IniVal(text, "vocals") != "1")
+        {
+            text = ReplaceKey(text, "vocals", "1");
+            changed.Add("vocals");
+        }
+
+        if (changed.Count == 0) return "";
+        try { File.WriteAllText(iniPath, text, new UTF8Encoding(false)); }
+        catch (Exception e) { Log("ini repair: cannot write " + iniPath + " : " + e.Message); return null; }
+        string s = string.Join("、", changed.ToArray());
+        Log("shim.ini repaired: " + s);
+        return s;
     }
 
     // ============ GPU-aware version picker ============
@@ -511,9 +711,12 @@ static class Installer
         return b == "cuda13" || b == "cuda" || b == "vulkan" || b == "cpu" || b == "cpu-legacy";
     }
 
-    static void PickComponents(bool quiet, string buildOverride, string modelOverride, string only,
-                               string versionOverride, bool sepFlag,
-                               out string build, out string model, out bool ff, out bool sep, out string version)
+    // Ask what the user wants, then hand back what is actually worth downloading.
+    // Returning Comp.None means "everything you asked for is already in place" --
+    // Main reports that instead of silently sitting through a re-download.
+    static Comp PickComponents(bool quiet, string buildOverride, string modelOverride, string only,
+                               string versionOverride, bool sepFlag, bool force, string engDir, string iniPath,
+                               out string build, out string model, out string version, out bool vocals1)
     {
         double cc;
         string gpuDesc = DetectGpu(out cc);
@@ -521,39 +724,91 @@ static class Installer
         string suggest = !hasNvidia ? "cpu" : (cc >= 12.0 ? "cuda13" : "cuda");
         build = !string.IsNullOrEmpty(buildOverride) && IsValidBuild(buildOverride) ? buildOverride : suggest;
         model = modelOverride == "f16" ? ModelF16 : ModelQ8;
-        ff = only != null && only.Contains("ffmpeg");
-        sep = only == null ? sepFlag : only.Contains("sep");
+        // no quant asked for explicitly: keep the one that is already intact on disk
+        if (string.IsNullOrEmpty(modelOverride)) model = SuggestModel(iniPath, engDir, model);
         version = string.IsNullOrEmpty(versionOverride) ? null : versionOverride;
-        // scripted modes (quiet, or explicit /build:/only:) skip the dialog
-        if (quiet || only != null || buildOverride != null) return;
 
-        using (var dlg = new PickDlg(gpuDesc, build, model, ff, sep))
+        Comp want, forced = Comp.None;
+        bool sep;
+        if (only != null)
         {
-            if (dlg.ShowDialog() != DialogResult.OK) throw new InvalidOperationException("已取消");
+            // /only: names exactly the pieces to install -> an explicit request, honoured
+            sep = only.Contains("sep");
+            want = Comp.None;
+            if (only.Contains("crisp")) want |= Comp.Crisp;
+            if (only.Contains("model")) want |= Comp.Model;
+            if (sep) want |= Comp.Sep;
+            if (only.Contains("ffmpeg") || sep) want |= Comp.Ffmpeg;
+            forced = want;
+        }
+        else
+        {
+            sep = sepFlag;
+            want = Comp.Crisp | Comp.Model;
+            if (sep) want |= Comp.Sep | Comp.Ffmpeg;   // separation resamples via ffmpeg
+            // an explicit /build: or /model: means "install this one now", not "check
+            // whether I already have something that works"
+            if (!string.IsNullOrEmpty(buildOverride)) forced |= Comp.Crisp;
+            if (!string.IsNullOrEmpty(modelOverride)) forced |= Comp.Model;
+        }
+
+        if (quiet || only != null || buildOverride != null)
+            return Narrow(want, forced, force, engDir, iniPath, model, out vocals1);
+
+        using (var dlg = new PickDlg(gpuDesc, build, model, sep,
+                                     CrispOk(iniPath, engDir), AnySpeechModelOk(iniPath, engDir)))
+        {
+            if (dlg.ShowDialog() != DialogResult.OK) throw new Skipped();
             build = dlg.SelectedBuild;
             model = dlg.SelectedModel;
-            ff = dlg.Ffmpeg;
-            sep = dlg.Sep;
+            want = Comp.Crisp | Comp.Model;
+            if (dlg.Ffmpeg) want |= Comp.Ffmpeg;
+            if (dlg.Sep) want |= Comp.Sep | Comp.Ffmpeg;
+            if (dlg.ReinstallRuntime) forced |= Comp.Crisp;
             // an explicit /version: on the command line outranks the checkbox
             if (string.IsNullOrEmpty(version)) version = dlg.Latest ? "latest" : null;
         }
+        return Narrow(want, forced, force, engDir, iniPath, model, out vocals1);
+    }
+
+    // keep only the pieces that are genuinely absent; force (/force) keeps them all
+    static Comp Narrow(Comp want, Comp forced, bool force, string engDir, string iniPath, string model,
+                       out bool vocals1)
+    {
+        vocals1 = (want & Comp.Sep) != 0;
+        if (force) return want;
+        if ((want & Comp.Crisp) != 0 && (forced & Comp.Crisp) == 0 && CrispOk(iniPath, engDir)) want &= ~Comp.Crisp;
+        if ((want & Comp.Model) != 0 && (forced & Comp.Model) == 0 && ModelOk(iniPath, engDir, model)) want &= ~Comp.Model;
+        if ((want & Comp.Sep) != 0 && (forced & Comp.Sep) == 0 && SepOk(iniPath, engDir)) want &= ~Comp.Sep;
+        if ((want & Comp.Ffmpeg) != 0 && (forced & Comp.Ffmpeg) == 0 && FfmpegOk(iniPath, engDir)) want &= ~Comp.Ffmpeg;
+        return want;
+    }
+
+    // offer the quant that is already on disk, so a repair run doesn't "switch" models
+    static string SuggestModel(string iniPath, string engDir, string def)
+    {
+        if (ModelOk(iniPath, engDir, def)) return def;
+        if (ModelOk(iniPath, engDir, ModelQ8)) return ModelQ8;
+        if (ModelOk(iniPath, engDir, ModelF16)) return ModelF16;
+        return def;
     }
 
     class PickDlg : Form
     {
         Dictionary<string, RadioButton> buildRadios = new Dictionary<string, RadioButton>();
         RadioButton q8, f16;
-        CheckBox ffBox, sepBox, latestBox;
+        CheckBox ffBox, sepBox, latestBox, reBox;
         public string SelectedBuild, SelectedModel;
-        public bool Ffmpeg, Sep, Latest;
+        public bool Ffmpeg, Sep, Latest, ReinstallRuntime;
 
-        public PickDlg(string gpuDesc, string suggestBuild, string suggestModel, bool suggestFf, bool suggestSep)
+        public PickDlg(string gpuDesc, string suggestBuild, string suggestModel, bool suggestSep,
+                       bool hasRuntime, bool hasModel)
         {
             Text = "CrispASR for PotPlayer - 选择要下载的组件";
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false; MinimizeBox = false;
             StartPosition = FormStartPosition.CenterScreen;
-            ClientSize = new Size(560, 494);
+            ClientSize = new Size(560, 518);
             Font = new Font("Microsoft YaHei UI", 9f);
 
             var gpu = new Label();
@@ -562,8 +817,10 @@ static class Installer
             Controls.Add(gpu);
 
             var gb1 = new GroupBox();
-            gb1.Text = "CrispASR 版本";
-            gb1.SetBounds(12, 34, 536, 192);
+            gb1.Text = hasRuntime
+                ? "CrispASR 版本（目录里已有运行时，默认不重下）"
+                : "CrispASR 版本";
+            gb1.SetBounds(12, 34, 536, 214);
             Controls.Add(gb1);
             AddBuild(gb1, "cuda13", "CUDA 13 版 — RTX 50 系（Blackwell，如 5060~5090）等新卡", 24);
             AddBuild(gb1, "cuda", "CUDA 12 版 — GTX 10 / RTX 20~40 等更早的 NVIDIA 显卡", 52);
@@ -571,20 +828,29 @@ static class Installer
             AddBuild(gb1, "cpu", "CPU 版 — 无独立显卡；需 CPU 支持 AVX2（Intel 2013+ / AMD 2015+）", 108);
             AddBuild(gb1, "cpu-legacy", "CPU 兼容版 — 更老的 CPU（无 AVX2），速度较慢", 136);
             var tip1 = new Label();
-            tip1.SetBounds(10, 164, 520, 18);
+            tip1.SetBounds(10, 162, 520, 18);
             tip1.Text = "不确定就按推荐选；运行失败还可在 shim.ini 设 nogpu=1 回退 CPU。";
             tip1.ForeColor = Color.Gray;
             gb1.Controls.Add(tip1);
 
+            reBox = new CheckBox();
+            reBox.Text = "重新下载 CrispASR 运行时（≈100 MB）— 换 CUDA/CPU 版本或怀疑装坏了才需要";
+            reBox.SetBounds(10, 186, 520, 20);
+            reBox.Visible = hasRuntime;
+            reBox.CheckedChanged += delegate { ReinstallRuntime = reBox.Checked; };
+            gb1.Controls.Add(reBox);
+
             latestBox = new CheckBox();
             latestBox.Text = "检查最新版（默认只装已验证的 " + Dl.PinnedTag + " + SHA-256，勾选则不校验）";
-            latestBox.SetBounds(14, 230, 536, 20);
+            latestBox.SetBounds(14, 254, 536, 20);
             latestBox.CheckedChanged += delegate { Latest = latestBox.Checked; };
             Controls.Add(latestBox);
 
             var gb2 = new GroupBox();
-            gb2.Text = "日语模型 parakeet-tdt-0.6b-ja（GGUF）";
-            gb2.SetBounds(12, 256, 536, 88);
+            gb2.Text = hasModel
+                ? "日语模型 parakeet-tdt-0.6b-ja（已有校验通过的模型，选中项已存在则跳过）"
+                : "日语模型 parakeet-tdt-0.6b-ja（GGUF）";
+            gb2.SetBounds(12, 280, 536, 88);
             Controls.Add(gb2);
             q8 = new RadioButton();
             q8.Text = "q8_0（≈642 MB，推荐）— 精度与 f16 几乎无差别，加载更快";
@@ -596,12 +862,12 @@ static class Installer
 
             ffBox = new CheckBox();
             ffBox.Text = "下载 ffmpeg（可选 ≈115 MB）— crispasr 内置解码失败时的兜底解码器；仅 PotPlayer 内用可不装";
-            ffBox.SetBounds(14, 352, 536, 22);
+            ffBox.SetBounds(14, 376, 536, 22);
             Controls.Add(ffBox);
 
             sepBox = new CheckBox();
             sepBox.Text = "启用人声分离（默认关闭）— 下载分离模型 ≈436 MB，并自动附带 ffmpeg";
-            sepBox.SetBounds(14, 378, 536, 22);
+            sepBox.SetBounds(14, 402, 536, 22);
             sepBox.CheckedChanged += delegate
             {
                 Sep = sepBox.Checked;
@@ -611,7 +877,7 @@ static class Installer
             Controls.Add(sepBox);
 
             var tip2 = new Label();
-            tip2.SetBounds(14, 404, 536, 36);
+            tip2.SetBounds(14, 428, 536, 36);
             tip2.ForeColor = Color.Gray;
             tip2.Text = "开启后 PotPlayer 转写前先分离人声，整体耗时约 3 倍（实测 60 秒音频 2.4s → 7.2s），清晰对白"
                       + "素材提升不明显；勾选会在 shim.ini 写入 vocals=1。";
@@ -619,11 +885,11 @@ static class Installer
 
             var ok = new Button();
             ok.Text = "开始下载";
-            ok.SetBounds(330, 450, 100, 32);
+            ok.SetBounds(330, 474, 100, 32);
             ok.DialogResult = DialogResult.OK;
             var cancel = new Button();
             cancel.Text = "跳过下载";
-            cancel.SetBounds(440, 450, 100, 32);
+            cancel.SetBounds(440, 474, 100, 32);
             cancel.DialogResult = DialogResult.Cancel;
             Controls.Add(ok); Controls.Add(cancel);
             AcceptButton = ok; CancelButton = cancel;
@@ -632,13 +898,13 @@ static class Installer
             buildRadios.TryGetValue(suggestBuild, out pre);
             if (pre != null) pre.Checked = true; else buildRadios["cpu"].Checked = true;
             if (suggestModel == ModelF16) f16.Checked = true; else q8.Checked = true;
-            ffBox.Checked = suggestFf || suggestSep;   // separation needs ffmpeg to resample
+            ffBox.Checked = suggestSep;              // separation needs ffmpeg to resample
             ffBox.Enabled = !suggestSep;
             sepBox.Checked = suggestSep;
 
             SelectedBuild = suggestBuild; SelectedModel = suggestModel;
-            Ffmpeg = suggestFf || suggestSep; Sep = suggestSep;
-            Latest = false;
+            Ffmpeg = suggestSep; Sep = suggestSep;
+            Latest = false; ReinstallRuntime = false;
         }
 
         void AddBuild(GroupBox gb, string id, string text, int y)
@@ -659,6 +925,7 @@ static class Installer
                 SelectedModel = f16.Checked ? ModelF16 : ModelQ8;
                 Ffmpeg = ffBox.Checked;
                 Sep = sepBox.Checked;
+                ReinstallRuntime = reBox.Checked;
             }
             base.OnFormClosing(e);
         }
