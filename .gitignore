@@ -4,3 +4,7 @@
 *.gguf
 Thumbs.db
 Desktop.ini
+
+# 图标绘制脚本与大图只留在本地，仓库只发布成品 .ico
+assets/mkicon.ps1
+assets/*.png
