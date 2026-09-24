@@ -252,12 +252,18 @@ src\build.bat
 | [CrispASR](https://github.com/CrispStrobe/CrispASR) | 实际执行识别的引擎 | **MIT** | GitHub Releases |
 | [parakeet-tdt_ctc-0.6b-ja](https://huggingface.co/nvidia/parakeet-tdt_ctc-0.6b-ja) | NVIDIA 日语语音模型 | **CC-BY-4.0** | Hugging Face |
 | [parakeet-tdt-0.6b-ja-GGUF](https://huggingface.co/cstr/parakeet-tdt-0.6b-ja-GGUF) | 上述模型的 GGUF 转换版（本项目实际下载） | **CC-BY-4.0** | Hugging Face（国内走 hf-mirror 镜像） |
+| [mel-band-roformer-vocals-GGUF](https://huggingface.co/cstr/mel-band-roformer-vocals-GGUF) | 可选的人声分离模型（`vocals=1` 时下载） | **MIT**：转换仓库与其声明的权重来源 [KimberleyJSN/melbandroformer](https://huggingface.co/KimberleyJSN/melbandroformer) 均标 MIT，架构来自 MIT 的 [lucidrains/BS-RoFormer](https://github.com/lucidrains/BS-RoFormer) | Hugging Face |
 | [silero VAD](https://github.com/snakers4/silero-vad) | crispasr `--vad` 首次运行时自动下载的静音检测模型 | 见上游仓库声明 | 由 crispasr 自行下载 |
 | [ffmpeg](https://www.gyan.dev/ffmpeg/builds/) | 解码兜底 / 批量脚本抽音轨 | **GPL-3.0**（gyan 构建） | gyan.dev |
 | [PotPlayer](https://potplayer.daum.net/) | 宿主播放器，提供引擎槽位 | 专有免费软件 | 官方站点 |
 
 感谢 CrispASR、NVIDIA（Parakeet 模型）、ggml/whisper.cpp 与 silero 的作者们把工具和模型开源。
 CC-BY-4.0 要求再分发模型时保留署名——你若把模型文件复制给他人，请连同本表格一并转达出处。
+
+分离模型的 MIT 有个如实说明：转换仓库与权重来源仓库都只在模型卡片元数据里标
+`license: mit`，**没有随附 LICENSE 正文或版权行**，所以再分发时能转达的"署名"就只有上面
+那行出处链接；上游同样未公开训练数据来源（转换仓库的卡片自己点明了这个文档缺口）。
+个人看片无所谓，要商用请自行评估。
 
 ## 免责说明
 
