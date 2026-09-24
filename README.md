@@ -74,7 +74,8 @@ crispasr -m <model.gguf> -f <audio> -l ja --vad -osrt -of <out>\<base> --split-o
 - 把垫片写入 `<PotPlayer>\Engine\Whisper-Faster\`：
   若该目录已有**不是本项目发布的引擎 exe**（官方 whisper-faster / faster-whisper-xxl 等），
   自动改名为 `whisper-faster.real.exe` 备份、绝不删除——想换回官方引擎时改回原名即可；
-  同名备份已存在时带时间戳（`whisper-faster.real-20260924-155339.exe`），不会覆盖前一份；
+  同名的旧 shim.ini 一并另存为 `shim.ini.bak`（安装器**只改名、不删任何用户文件**）；
+  备份名已存在时带时间戳（`whisper-faster.real-20260924-155339.exe`），不会覆盖前一份；
   完成弹窗会报告被备份的文件名、字节数与 SHA-256（前 16 位），便于你回查
   - 判定依据是"是否为我们发的那份"：与内置 exe 逐字节相同，或含本项目 shim 的
     内部标记（同尺寸被改过的构建也会被识别为本项目的并直接覆盖）。
@@ -107,11 +108,12 @@ crispasr -m <model.gguf> -f <audio> -l ja --vad -osrt -of <out>\<base> --split-o
   CrispASR-PotPlayer-Setup.exe /quiet "X:\..." /download                     :: 按显卡自动选版下载组件
   ... /download /build:cuda13 /model:f16                                     :: 指定版本（可加 /only:crisp+model）
   ... /download /sep                                                         :: 人声分离：连带下载 ffmpeg 并写入 vocals=1
+  ... /sep                                                                   :: 组件已装好时单独打开 vocals=1（不下载任何东西）
   ... /download /only:crisp,model,sep,ffmpeg                                 :: 只下其中几项（sep 仍会自动带上 ffmpeg）
   ... /download /version:latest                                              :: 显式跟最新版（跳过哈希校验）
   ```
 
-  退出码：0 成功 / 2 未找到 PotPlayer / 3 写入失败 / 4 下载失败
+  退出码：0 成功 / 2 未找到 PotPlayer / 3 写入失败 / 4 下载失败（含中途取消）
 
 **方式二：手动** —— 把 `bin\whisper-faster.exe` 放进 `<PotPlayer>\Engine\Whisper-Faster\`，
 并把下载好的 CrispASR 放在同目录 `CrispASR\` 子目录（即 `CrispASR\crispasr.exe`、
@@ -173,7 +175,9 @@ PotPlayer 播放影片 → 右键菜单 / 字幕菜单 → **声音生成字幕*
   日志里写明跳过原因（`vocals=1 but separation model not found` / `no ffmpeg`）。
   安装器里这两者是绑定的：勾选"启用人声分离"会自动带上 ffmpeg（该项同时被锁定），
   下载完成后把 `shim.ini` 的 `vocals` 写成 `1`；不勾选则默认 `0`，也不会去动你
-  自己改过的开关。
+  自己改过的开关。这个勾选框只出现在"下载组件"那一步，组件早已装好的话，
+  直接改 `shim.ini` 或跑 `Setup.exe /quiet "<PotPlayer 目录>" /sep`（不带 `/download`）
+  即可打开开关；缺分离模型时它会把话说明白，不会假装启用成功。
 - 慢：60 秒素材不分离 2.4 s 出字幕，分离后 7.2 s（分离本身约 4.4 s，主要是模型加载）。
   时长比例约等于"总耗时 ×3"，所以日常生肉追新番不建议常开。
 - 多占临时盘：`%TEMP%\crispasr-voc-<时间戳>\` 下多一份 44.1 kHz 立体声原轨与人声轨，
@@ -240,14 +244,14 @@ src\build.bat
 
 仅需 .NET Framework 4.x（Win10/11 自带），无任何第三方依赖。
 一次产出两个文件：`bin\whisper-faster.exe`（垫片）与
-`bin\CrispASR-PotPlayer-Setup.exe`（安装器，垫片与 ini 模板以资源形式内嵌，
-安装器图标由 `assets\mkicon.ps1` 绘制的 `assets\setup.ico` 通过 `-win32icon` 封装）。
+`bin\CrispASR-PotPlayer-Setup.exe`（安装器，垫片与 ini 模板以资源形式内嵌）。
+两者都用 `-win32icon:assets\app.ico` 封装同一枚图标（自绘波形 + 字幕框，
+16~256 px 七档；仓库只发布成品 `.ico`，绘制脚本与大图留在本地）。
 `bin\` 内已附最新预编译产物。
 
 ## License
 
-本项目自身代码（`src\`、`config\`、`tools\`）与 `assets\` 下的图标
-（由 `assets\mkicon.ps1` 纯代码绘制，无外部素材）采用 **MIT**，见 `LICENSE`。
+本项目自身代码（`src\`、`config\`、`tools\`）与 `assets\app.ico` 图标采用 **MIT**，见 `LICENSE`。
 
 ## 第三方许可与致谢
 

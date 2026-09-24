@@ -82,6 +82,8 @@ static class Installer
 
         // ---- optional component download ----
         string dlError = null;
+        Exception dlEx = null;
+        string iniNote = null;
         bool didDownload = false;
         try
         {
@@ -100,22 +102,43 @@ static class Installer
                 PickComponents(quiet, buildOverride, modelOverride, only, versionOverride, sepFlag,
                                out build, out model, out ff, out sep, out version);
                 Dl.Run(engDir, build, model, ff, sep, only, version);
-                UpdateIniAfterDownload(iniPath, engDir, sep);
                 didDownload = true;
+                if (!UpdateIniAfterDownload(iniPath, engDir, sep))
+                    iniNote = "组件已下载完成，但 shim.ini 更新失败，请查看日志：" + LogPath;
+            }
+            else if (sepFlag)
+            {
+                // /sep without a download run (components already present): the
+                // checkbox never appeared, so honour the flag where it lives -- shim.ini
+                string sepFile = Path.Combine(engDir, @"CrispASR\models\" + Dl.SepModel);
+                iniNote = !UpdateIniAfterDownload(iniPath, engDir, true)
+                    ? "/sep 未能写入 shim.ini（见日志），请手动把 vocals 改成 1"
+                    : File.Exists(sepFile)
+                        ? "已按 /sep 把 shim.ini 的 vocals 写成 1。"
+                        : "已按 /sep 把 vocals 写成 1，但目录里还没有分离模型 " + Dl.SepModel
+                          + "，运行时会跳过分离；补下：Setup.exe /quiet \"<PotPlayer 目录>\" /download /only:sep";
+                Log(iniNote);
             }
         }
         catch (Exception e)
         {
             dlError = e.Message;
+            dlEx = e;
             Log("download failed: " + e);
         }
 
         if (quiet) return dlError == null ? 0 : 4;
         if (dlError != null)
-            MessageBox.Show("组件下载失败（垫片本身已安装成功）：\n" + dlError
+        {
+            bool cancelled = Dl.WasCancelled(dlEx);
+            MessageBox.Show((cancelled ? "已取消下载（垫片本身已安装成功）：\n"
+                                       : "组件下载失败（垫片本身已安装成功）：\n")
+                + dlError
                 + "\n\n可参考 README 手动下载对应组件，放进目录后重跑安装器即可（已下好的会跳过）。"
                 + "\n详细日志：" + LogPath,
-                "CrispASR for PotPlayer", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                "CrispASR for PotPlayer", MessageBoxButtons.OK,
+                cancelled ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
+        }
 
         string tail = didDownload ? "\n组件已下载完成，shim.ini 路径已按安装目录自动配置。"
             : (File.Exists(Path.Combine(engDir, @"CrispASR\crispasr.exe"))
@@ -124,6 +147,7 @@ static class Installer
                   + "\n稍后把 CrispASR（含 models 目录里的模型）放进该目录即可直接使用，无需再改配置。");
         if (res != null && res.BackupNote != null)
             tail += "\n" + res.BackupNote + "，把它改回 whisper-faster.exe 即可还原官方引擎。";
+        if (iniNote != null) tail += "\n" + iniNote;
         MessageBox.Show(
             "安装完成：\n" + Path.Combine(engDir, "whisper-faster.exe") + tail
             + "\n\n重启 PotPlayer 后，在『声音生成字幕』引擎下拉选 Whisper-Faster 即可。",
@@ -245,12 +269,12 @@ static class Installer
         return true;
     }
 
-    // never overwrite a previous backup: whisper-faster.real.exe, then a stamped name
-    static string UniqueRealPath(string dst)
+    // never overwrite a previous backup: <stem><ext>, then a stamped sibling
+    static string UniquePath(string dir, string stem, string ext)
     {
-        string p = Path.Combine(dst, "whisper-faster.real.exe");
+        string p = Path.Combine(dir, stem + ext);
         if (!File.Exists(p)) return p;
-        return Path.Combine(dst, "whisper-faster.real-" + DateTime.Now.ToString("yyyyMMdd-HHmmss") + ".exe");
+        return Path.Combine(dir, stem + "-" + DateTime.Now.ToString("yyyyMMdd-HHmmss") + ext);
     }
 
     static string Sha256Prefix(byte[] buf)
@@ -284,12 +308,21 @@ static class Installer
             ours = cur != null && (SameBytes(cur, exe) || ContainsMarker(cur));
             if (!ours)
             {
-                string real = UniqueRealPath(dst);
+                string real = UniquePath(dst, "whisper-faster.real", ".exe");
                 File.Move(exePath, real);
-                if (File.Exists(iniPath)) File.Delete(iniPath); // ini of a different setup
+                // that shim.ini was written for the engine we just moved aside; set it
+                // aside too -- this installer renames user files, it never deletes one
+                string iniBak = null;
+                if (File.Exists(iniPath))
+                {
+                    iniBak = UniquePath(dst, "shim.ini.bak", "");
+                    File.Move(iniPath, iniBak);
+                }
                 r.BackupNote = "原有引擎已备份为 " + Path.GetFileName(real)
-                    + "（" + (cur == null ? "无法读取" : cur.Length + " 字节，SHA-256 " + Sha256Prefix(cur) + "…") + "）";
-                Log("backed up non-shim engine: " + real);
+                    + "（" + (cur == null ? "无法读取" : cur.Length + " 字节，SHA-256 " + Sha256Prefix(cur) + "…") + "）"
+                    + (iniBak == null ? "" : "，原 shim.ini 另存为 " + Path.GetFileName(iniBak));
+                Log("backed up non-shim engine: " + real
+                    + (iniBak == null ? "" : " ; shim.ini -> " + iniBak));
             }
         }
 
@@ -331,14 +364,23 @@ static class Installer
     {
         string prefix = key + "=";
         var lines = text.Split('\n');
+        bool found = false;
         for (int i = 0; i < lines.Length; i++)
         {
             string ln = lines[i].TrimEnd('\r');
             if (ln.TrimStart().StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
             {
                 lines[i] = prefix + value;
+                found = true;
                 break;
             }
+        }
+        // a shim.ini from an older build may predate the key: appending beats
+        // silently doing nothing
+        if (!found)
+        {
+            Array.Resize(ref lines, lines.Length + 1);
+            lines[lines.Length - 1] = prefix + value;
         }
         return string.Join(Environment.NewLine, lines);
     }
@@ -392,24 +434,29 @@ static class Installer
         return null;
     }
 
-    static void UpdateIniAfterDownload(string iniPath, string engDir, bool sep)
+    // refresh the paths shim.ini points at after a download; returns false when
+    // shim.ini could not be read or written
+    static bool UpdateIniAfterDownload(string iniPath, string engDir, bool sep)
     {
         try
         {
-            string crisp = Path.Combine(Path.Combine(engDir, "CrispASR"), "crispasr.exe");
-            if (!File.Exists(crisp)) return;
             string text = File.ReadAllText(iniPath, Encoding.UTF8);
-            text = ReplaceKey(text, "crispasr", crisp);
-            string model = AutoFindModel(crisp);
-            if (model != null) text = ReplaceKey(text, "model", model);
-            string ffdir = Path.Combine(engDir, "ffmpeg");
-            if (File.Exists(Path.Combine(ffdir, "ffmpeg.exe"))) text = ReplaceKey(text, "ffmpeg_dir", ffdir);
+            string crisp = Path.Combine(Path.Combine(engDir, "CrispASR"), "crispasr.exe");
+            if (File.Exists(crisp))
+            {
+                text = ReplaceKey(text, "crispasr", crisp);
+                string model = AutoFindModel(crisp);
+                if (model != null) text = ReplaceKey(text, "model", model);
+                string ffdir = Path.Combine(engDir, "ffmpeg");
+                if (File.Exists(Path.Combine(ffdir, "ffmpeg.exe"))) text = ReplaceKey(text, "ffmpeg_dir", ffdir);
+            }
             // enable only on an explicit "yes" in this run — never silently switch a
             // user's own vocals=1 back off on re-install
             if (sep) text = ReplaceKey(text, "vocals", "1");
             File.WriteAllText(iniPath, text, new UTF8Encoding(false));
+            return true;
         }
-        catch (Exception e) { Log("ini update failed: " + e.Message); }
+        catch (Exception e) { Log("ini update failed: " + e.Message); return false; }
     }
 
     // ============ GPU-aware version picker ============

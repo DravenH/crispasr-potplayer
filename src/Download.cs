@@ -118,7 +118,21 @@ static class Dl
             try { Directory.Delete(tmp, true); } catch { }
             try { dlg.Close(); } catch { }
         }
-        if (dlg.Cancelled) throw new InvalidOperationException("已取消下载");
+        if (dlg.Cancelled) throw new Cancelled();
+    }
+
+    // the user pressed 取消 -- distinct from a network/server failure so the
+    // installer can say "已取消下载" instead of "下载失败"
+    class Cancelled : Exception
+    {
+        public Cancelled() : base("已取消下载") { }
+    }
+
+    // the installer asks this to title its dialog correctly for a cancel
+    public static bool WasCancelled(Exception e)
+    {
+        for (; e != null; e = e.InnerException) if (e is Cancelled) return true;
+        return false;
     }
 
     // one labelled stage: any failure names the component in the message the
@@ -130,15 +144,18 @@ static class Dl
         {
             if (e is ComponentError) throw;
             Log(what + " failed: " + e);
-            throw new ComponentError(what, e);
+            throw new ComponentError(what, e is Cancelled ? "已取消下载" : "下载失败", e);
         }
     }
 
     class ComponentError : Exception
     {
-        public ComponentError(string what, Exception inner)
-            : base("【" + what + "】下载失败\n"
-                + (string.IsNullOrEmpty(inner.Message) ? inner.GetType().Name : inner.Message), inner) { }
+        public ComponentError(string what, string verb, Exception inner)
+            : base("【" + what + "】" + verb
+                + (inner is Cancelled
+                    ? ""                                   // "已取消下载" already says it all
+                    : "\n" + (string.IsNullOrEmpty(inner.Message) ? inner.GetType().Name : inner.Message)),
+                  inner) { }
     }
 
     static void GetRuntime(WebClient wc, Dlg dlg, string engDir, string tmp, string build, string version, bool headless)
@@ -155,18 +172,39 @@ static class Dl
         dlg.SetInfo("解压 CrispASR…");
         if (!headless) Application.DoEvents();
         string exeRoot = Path.Combine(engDir, "CrispASR");
-        // models/ lives inside CrispASR but is ours to keep: move it aside
-        // so re-installing the runtime never throws away a 642 MB download
+        // models/ lives inside CrispASR but is ours to keep: move it aside so
+        // re-installing the runtime never throws away a 642 MB download. The
+        // staging dir sits on engDir's own volume -- MoveDir is a plain rename
+        // there, whereas %TEMP% on another drive would copy a 1 GB gguf twice
+        // (and need the free space for it).
         string models = Path.Combine(exeRoot, "models");
-        string keep = Path.Combine(tmp, "keepmodels");
+        string keep = Path.Combine(engDir, "models.keep");
         bool kept = false;
+        if (Directory.Exists(keep))
+        {
+            // leftover from a run that died mid-swap; ours to clear
+            Log("clearing stale staging dir " + keep);
+            try { Directory.Delete(keep, true); } catch { }
+        }
         if (Directory.Exists(models)) { MoveDir(models, keep); kept = true; }
-        if (Directory.Exists(exeRoot)) Directory.Delete(exeRoot, true);
-        string unz = Path.Combine(tmp, "unz");
-        ZipFile.ExtractToDirectory(zip, unz);
-        string found = FindCrispDir(unz);
-        if (found == null) throw new InvalidOperationException("zip 内未找到 crispasr.exe");
-        MoveDir(found, exeRoot);
+        try
+        {
+            if (Directory.Exists(exeRoot)) Directory.Delete(exeRoot, true);
+            string unz = Path.Combine(tmp, "unz");
+            ZipFile.ExtractToDirectory(zip, unz);
+            string found = FindCrispDir(unz);
+            if (found == null) throw new InvalidOperationException("zip 内未找到 crispasr.exe");
+            MoveDir(found, exeRoot);
+        }
+        catch
+        {
+            if (kept && !Directory.Exists(models))
+            {
+                try { MoveDir(keep, models); } catch { }   // put the models back, then report
+                kept = false;
+            }
+            throw;
+        }
         if (kept) MoveDir(keep, models);
         File.Delete(zip);
     }
@@ -501,7 +539,7 @@ static class Dl
                     }
                 }
                 resp.Close();
-                if (dlg.Cancelled) throw new InvalidOperationException("已取消下载");
+                if (dlg.Cancelled) throw new Cancelled();
                 if (!File.Exists(part) || new FileInfo(part).Length == 0)
                     throw new InvalidOperationException("下载未完成: " + url);
                 if (File.Exists(file)) File.Delete(file);
