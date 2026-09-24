@@ -147,6 +147,109 @@ static class XxlShim
         catch (Exception e) { err = e.GetType().Name + ": " + e.Message; try { File.Delete(dst); } catch { } return false; }
     }
 
+    static string FindFfmpeg(string ffmpegDir)
+    {
+        if (!string.IsNullOrEmpty(ffmpegDir))
+        {
+            string p = Path.Combine(ffmpegDir, "ffmpeg.exe");
+            if (File.Exists(p)) return p;
+        }
+        string local = Path.Combine(ExeDir, @"ffmpeg\ffmpeg.exe");
+        if (File.Exists(local)) return local;
+        string envDir = Ini("ffmpeg_dir", "");
+        if (envDir.Length > 0)
+        {
+            local = Path.Combine(envDir, "ffmpeg.exe");
+            if (File.Exists(local)) return local;
+        }
+        foreach (var d in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(';'))
+        {
+            if (d.Length == 0) continue;
+            try
+            {
+                string p = Path.Combine(d.Trim(), "ffmpeg.exe");
+                if (File.Exists(p)) return p;
+            }
+            catch { }
+        }
+        return null;
+    }
+
+    // Run a helper process to completion, capturing output for the log.
+    static int RunCapture(string exe, string args, int ms, out string err)
+    {
+        err = null;
+        try
+        {
+            var psi = new ProcessStartInfo(exe, args)
+            {
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+                StandardOutputEncoding = Encoding.UTF8,
+                StandardErrorEncoding = Encoding.UTF8
+            };
+            using (var p = Process.Start(psi))
+            {
+                var sb = new StringBuilder();
+                p.OutputDataReceived += (s, e) => { if (e.Data != null) lock (sb) sb.Append(e.Data).Append(' '); };
+                p.ErrorDataReceived += (s, e) => { if (e.Data != null) lock (sb) sb.Append(e.Data).Append(' '); };
+                p.BeginOutputReadLine();
+                p.BeginErrorReadLine();
+                if (!p.WaitForExit(ms))
+                {
+                    try { p.Kill(); } catch { }
+                    err = "timeout after " + ms + " ms";
+                    return -1;
+                }
+                p.WaitForExit();
+                err = sb.ToString().Trim();
+                if (err.Length > 400) err = err.Substring(err.Length - 400);
+                return p.ExitCode;
+            }
+        }
+        catch (Exception e) { err = e.GetType().Name + ": " + e.Message; return -1; }
+    }
+
+    // Optional pre-pass: crispasr's own --separate (mel-band-roformer) writes
+    // <input>_<stem>.wav. It expects 44.1 kHz stereo, which PotPlayer's dump
+    // usually is not, so resample first. Returns null to mean "transcribe as-is";
+    // workDir is then always safe to delete.
+    static string SeparateVoices(string crispasr, string sepModel, string ffmpeg, string input,
+                                 bool useGpu, out string workDir)
+    {
+        workDir = Path.Combine(Path.GetTempPath(), "crispasr-voc-" + DateTime.Now.ToString("HHmmss"));
+        string full = Path.Combine(workDir, "src441.wav");
+        string outDir = Path.Combine(workDir, "stems");
+        try
+        {
+            Directory.CreateDirectory(outDir);
+            string err;
+            if (RunCapture(ffmpeg, "-y -hide_banner -loglevel error -i \"" + input +
+                           "\" -vn -ac 2 -ar 44100 -c:a pcm_s16le \"" + full + "\"", 600000, out err) != 0)
+            {
+                Log("vocals: ffmpeg resample failed: " + err);
+                return null;
+            }
+            string sep = string.Format("--separate -m \"{0}\" -f \"{1}\" --stems vocals --sep-output-dir \"{2}\"",
+                                       sepModel, full, outDir);
+            if (!useGpu) sep += " --no-gpu";
+            Log("crispasr separate cmd: " + sep);
+            if (RunCapture(crispasr, sep, 3600000, out err) != 0)
+                Log("vocals: separate did not exit cleanly: " + err);
+            string vocal = Path.Combine(outDir, Path.GetFileNameWithoutExtension(full) + "_vocals.wav");
+            if (!File.Exists(vocal) || new FileInfo(vocal).Length < 100000)
+            {
+                Log("vocals: expected output missing or tiny: " + vocal);
+                return null;
+            }
+            Log("vocals: separated -> " + vocal + " (" + new FileInfo(vocal).Length + " bytes)");
+            return vocal;
+        }
+        catch (Exception e) { Log("vocals: failed: " + e.Message); return null; }
+    }
+
     static int RunCrisp(string crispasr, string model, string input, string lang, string of,
                         string extra, bool useGpu, string partPath, string ffmpegDir)
     {
@@ -254,6 +357,12 @@ static class XxlShim
         string extra    = Ini("extra",    "--split-on-punct --flush-after 1");
         bool useGpu     = Ini("nogpu", "0") != "1";
         LogEnabled      = Ini("log", "1") != "0";
+        bool vocals     = Ini("vocals", "0") == "1";
+        string sepModel = Ini("separation_model", "");
+        if (sepModel.Length == 0)
+            sepModel = PickExisting(
+                Path.Combine(ExeDir, @"CrispASR\models\mel-band-roformer-vocals-f16.gguf"),
+                Path.Combine(ExeDir, @"models\mel-band-roformer-vocals-f16.gguf"));
         string ffmpegDir = Ini("ffmpeg_dir", "");
         if (ffmpegDir.Length == 0 && File.Exists(Path.Combine(ExeDir, @"ffmpeg\ffmpeg.exe")))
             ffmpegDir = Path.Combine(ExeDir, "ffmpeg");
@@ -324,15 +433,29 @@ static class XxlShim
             Log("direct input, copy unavailable (" + err + ")");
         }
 
-        int code = RunCrisp(crispasr, model, effInput, lang, of, extra, useGpu, partPath, ffmpegDir);
+        // opt-in noise-robustness pre-pass; falls back to the raw audio on any failure
+        string vocalWav = null, vocalDir = null;
+        if (vocals)
+        {
+            if (!File.Exists(sepModel)) Log("vocals=1 but separation model not found: " + sepModel);
+            else
+            {
+                string ff = FindFfmpeg(ffmpegDir);
+                if (ff == null) Log("vocals=1 but no ffmpeg on PATH/in ffmpeg_dir; skipping separation");
+                else vocalWav = SeparateVoices(crispasr, sepModel, ff, effInput, useGpu, out vocalDir);
+            }
+        }
+
+        int code = RunCrisp(crispasr, model, vocalWav != null ? vocalWav : effInput,
+                            lang, of, extra, useGpu, partPath, ffmpegDir);
 
         bool haveOutput =
             (File.Exists(targetSrt) && new FileInfo(targetSrt).Length > 0)
             || (File.Exists(of + ".srt") && new FileInfo(of + ".srt").Length > 0)
             || (File.Exists(partPath) && new FileInfo(partPath).Length > 0);
-        if (!haveOutput && copied)
+        if (!haveOutput && (copied || vocalWav != null))
         {
-            Log("copy attempt produced nothing (exit=" + code + "), retrying with original input");
+            Log("first attempt produced nothing (exit=" + code + "), retrying with unmodified input");
             code = RunCrisp(crispasr, model, input, lang, of, extra, useGpu, partPath, ffmpegDir);
         }
 
@@ -351,6 +474,7 @@ static class XxlShim
         }
         try { if (File.Exists(partPath)) File.Delete(partPath); } catch { }
         try { if (copied && File.Exists(copyPath)) File.Delete(copyPath); } catch { }
+        try { if (vocalDir != null && Directory.Exists(vocalDir)) Directory.Delete(vocalDir, true); } catch { }
         // safety copy from input-adjacent output
         string adjSrt = Path.ChangeExtension(input, ".srt");
         if (!File.Exists(targetSrt) && File.Exists(adjSrt))

@@ -24,6 +24,7 @@ static class Dl
     const string AssetPrefix = "https://github.com/CrispStrobe/CrispASR/releases/download/";
     const string GhProxy = "https://gh-proxy.org/"; // retry prefix when GitHub direct is blocked
     const string ModelRepo = "cstr/parakeet-tdt-0.6b-ja-GGUF";
+    const string SepRepo = "cstr/mel-band-roformer-vocals-GGUF"; // optional vocals pre-pass
     const string ModelHost1 = "https://hf-mirror.com/";
     const string ModelHost2 = "https://huggingface.co/";
     const string FfmpegUrl = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip";
@@ -48,6 +49,7 @@ static class Dl
         { "parakeet-tdt-0.6b-ja-q8_0.gguf", "5a61e6c7d956c3c72a76fafcd798cac0c9ea66d0e29b3910cd04865a1e42cc17" },
         { "parakeet-tdt-0.6b-ja.gguf", "374eb0132eebaec4df77a9631cbbeb03790be48a4a517f6cc8e8bdb38fe9a584" },
         { "parakeet-tdt-0.6b-ja-q4_k.gguf", "9a9bdfec5a1f119983a00367d33fb310759d67619309f02500f649c5328ab825" },
+        { "mel-band-roformer-vocals-f16.gguf", "fe94b114bce12653dae4e94968d28cbab36dcdd0c783fc052c3b656218233f24" },
     };
 
     static readonly Dictionary<string, long> ModelSize = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase)
@@ -55,14 +57,24 @@ static class Dl
         { "parakeet-tdt-0.6b-ja-q8_0.gguf", 673554880L },
         { "parakeet-tdt-0.6b-ja.gguf", 1246932800L },
         { "parakeet-tdt-0.6b-ja-q4_k.gguf", 405502208L },
+        { "mel-band-roformer-vocals-f16.gguf", 457014016L },
     };
+
+    static string RepoOf(string model)
+    {
+        return model.StartsWith("mel-band-roformer", StringComparison.OrdinalIgnoreCase) ? SepRepo : ModelRepo;
+    }
+
+    // file name the shim auto-detects for its opt-in vocals=1 pre-pass
+    public const string SepModel = "mel-band-roformer-vocals-f16.gguf";
 
     // version: null -> PinnedTag (hash-verified), "latest" -> newest release,
     // any other value -> that exact upstream tag (verified only when it is PinnedTag).
-    public static void Run(string engDir, string build, string model, bool wantFfmpeg, string only, string version)
+    public static void Run(string engDir, string build, string model, bool wantFfmpeg, bool sep, string only, string version)
     {
         bool wantCrisp = only == null || only.Contains("crisp");
         bool wantModel = only == null || only.Contains("model");
+        bool wantSep = only == null ? sep : only.Contains("sep"); // listing it in /only: requests it
         bool wantFf = only == null ? wantFfmpeg : wantFfmpeg && only.Contains("ffmpeg");
 
         var dlg = new Dlg();
@@ -104,35 +116,8 @@ static class Dl
                 File.Delete(zip);
             }
 
-            if (wantModel)
-            {
-                string mdir = Path.Combine(Path.Combine(engDir, "CrispASR"), "models");
-                Directory.CreateDirectory(mdir);
-                string mfile = Path.Combine(mdir, model);
-                string msha; ModelSha.TryGetValue(model, out msha);
-                long msize; ModelSize.TryGetValue(model, out msize);
-                bool have = false;
-                if (File.Exists(mfile))
-                {
-                    have = msize > 0 ? new FileInfo(mfile).Length == msize
-                                     : new FileInfo(mfile).Length > 100L * 1024 * 1024;
-                    if (have)
-                    {
-                        dlg.SetInfo("校验已有模型 " + model + " …");
-                        have = Verify(mfile, msha);   // unknown model name -> no hash -> keep it
-                        if (!have) dlg.SetInfo("已有模型校验不过，重新下载…");
-                    }
-                }
-                if (have)
-                    dlg.SetInfo("模型已存在且校验通过，跳过下载");
-                else
-                {
-                    string[] murls = new string[] {
-                        ModelHost1 + ModelRepo + "/resolve/main/" + model,
-                        ModelHost2 + ModelRepo + "/resolve/main/" + model };
-                    CheckSha(wc, dlg, delegate { FetchAny(wc, dlg, murls, mfile); }, mfile, msha);
-                }
-            }
+            if (wantModel) GetModel(wc, dlg, engDir, model);
+            if (wantSep) GetModel(wc, dlg, engDir, SepModel);
 
             if (wantFf)
             {
@@ -159,6 +144,39 @@ static class Dl
             try { dlg.Close(); } catch { }
         }
         if (dlg.Cancelled) throw new InvalidOperationException("已取消下载");
+    }
+
+    // Fetch one GGUF into <engDir>\CrispASR\models\ unless an intact copy is
+    // already there (size check first, then the pinned LFS oid).
+    static void GetModel(WebClient wc, Dlg dlg, string engDir, string model)
+    {
+        string mdir = Path.Combine(Path.Combine(engDir, "CrispASR"), "models");
+        Directory.CreateDirectory(mdir);
+        string mfile = Path.Combine(mdir, model);
+        string msha; ModelSha.TryGetValue(model, out msha);
+        long msize; ModelSize.TryGetValue(model, out msize);
+        bool have = false;
+        if (File.Exists(mfile))
+        {
+            have = msize > 0 ? new FileInfo(mfile).Length == msize
+                             : new FileInfo(mfile).Length > 100L * 1024 * 1024;
+            if (have)
+            {
+                dlg.SetInfo("校验已有模型 " + model + " …");
+                have = Verify(mfile, msha);   // unknown model name -> no hash -> keep it
+                if (!have) dlg.SetInfo("已有模型校验不过，重新下载…");
+            }
+        }
+        if (have)
+            dlg.SetInfo("模型已存在且校验通过，跳过下载");
+        else
+        {
+            string repo = RepoOf(model);
+            string[] murls = new string[] {
+                ModelHost1 + repo + "/resolve/main/" + model,
+                ModelHost2 + repo + "/resolve/main/" + model };
+            CheckSha(wc, dlg, delegate { FetchAny(wc, dlg, murls, mfile); }, mfile, msha);
+        }
     }
 
     static string FetchString(WebClient wc, string url)

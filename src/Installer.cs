@@ -4,7 +4,7 @@
 // picker dialog with GPU-aware hints.
 // GUI double-click flow, plus silent CLI:
 //   Setup.exe ["X:\PotPlayer"] /quiet [/download] [/build:cpu|cuda|cuda13|vulkan]
-//             [/model:f16] [/only:crisp,model,ffmpeg] [/version:v0.8.37|latest]
+//             [/model:f16] [/only:crisp,model,ffmpeg,sep] [/version:v0.8.37|latest] [/sep]
 // Downloads default to the hash-pinned release; /version: opts out of that pin.
 // Exit codes: 0 ok, 2 PotPlayer not found, 3 write failed, 4 download failed.
 using System;
@@ -31,11 +31,12 @@ static class Installer
         try { Application.EnableVisualStyles(); } catch { }
 
         string dir = null, buildOverride = null, modelOverride = null, only = null, versionOverride = null;
-        bool quiet = false, downloadFlag = false;
+        bool quiet = false, downloadFlag = false, sepFlag = false;
         foreach (var a in args)
         {
             if (a.Equals("/quiet", StringComparison.OrdinalIgnoreCase) || a.Equals("/s", StringComparison.OrdinalIgnoreCase)) quiet = true;
             else if (a.Equals("/download", StringComparison.OrdinalIgnoreCase)) downloadFlag = true;
+            else if (a.Equals("/sep", StringComparison.OrdinalIgnoreCase)) sepFlag = true;
             else if (a.StartsWith("/build:", StringComparison.OrdinalIgnoreCase)) buildOverride = a.Substring(7).ToLowerInvariant();
             else if (a.StartsWith("/model:", StringComparison.OrdinalIgnoreCase)) modelOverride = a.Substring(7).ToLowerInvariant();
             else if (a.StartsWith("/only:", StringComparison.OrdinalIgnoreCase)) only = a.Substring(6).ToLowerInvariant();
@@ -94,10 +95,10 @@ static class Installer
             if (wantDl)
             {
                 string build, model, version;
-                bool ff;
-                PickComponents(quiet, buildOverride, modelOverride, only, versionOverride,
-                               out build, out model, out ff, out version);
-                Dl.Run(engDir, build, model, ff, only, version);
+                bool ff, sep;
+                PickComponents(quiet, buildOverride, modelOverride, only, versionOverride, sepFlag,
+                               out build, out model, out ff, out sep, out version);
+                Dl.Run(engDir, build, model, ff, sep, only, version);
                 UpdateIniAfterDownload(iniPath, engDir);
                 didDownload = true;
             }
@@ -423,8 +424,8 @@ static class Installer
     }
 
     static void PickComponents(bool quiet, string buildOverride, string modelOverride, string only,
-                               string versionOverride,
-                               out string build, out string model, out bool ff, out string version)
+                               string versionOverride, bool sepFlag,
+                               out string build, out string model, out bool ff, out bool sep, out string version)
     {
         double cc;
         string gpuDesc = DetectGpu(out cc);
@@ -433,16 +434,18 @@ static class Installer
         build = !string.IsNullOrEmpty(buildOverride) && IsValidBuild(buildOverride) ? buildOverride : suggest;
         model = modelOverride == "f16" ? ModelF16 : ModelQ8;
         ff = only != null && only.Contains("ffmpeg");
+        sep = only == null ? sepFlag : only.Contains("sep");
         version = string.IsNullOrEmpty(versionOverride) ? null : versionOverride;
         // scripted modes (quiet, or explicit /build:/only:) skip the dialog
         if (quiet || only != null || buildOverride != null) return;
 
-        using (var dlg = new PickDlg(gpuDesc, build, model, ff))
+        using (var dlg = new PickDlg(gpuDesc, build, model, ff, sep))
         {
             if (dlg.ShowDialog() != DialogResult.OK) throw new InvalidOperationException("已取消");
             build = dlg.SelectedBuild;
             model = dlg.SelectedModel;
             ff = dlg.Ffmpeg;
+            sep = dlg.Sep;
             // an explicit /version: on the command line outranks the checkbox
             if (string.IsNullOrEmpty(version)) version = dlg.Latest ? "latest" : null;
         }
@@ -452,11 +455,11 @@ static class Installer
     {
         Dictionary<string, RadioButton> buildRadios = new Dictionary<string, RadioButton>();
         RadioButton q8, f16;
-        CheckBox ffBox, latestBox;
+        CheckBox ffBox, sepBox, latestBox;
         public string SelectedBuild, SelectedModel;
-        public bool Ffmpeg, Latest;
+        public bool Ffmpeg, Sep, Latest;
 
-        public PickDlg(string gpuDesc, string suggestBuild, string suggestModel, bool suggestFf)
+        public PickDlg(string gpuDesc, string suggestBuild, string suggestModel, bool suggestFf, bool suggestSep)
         {
             Text = "CrispASR for PotPlayer - 选择要下载的组件";
             FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -508,6 +511,12 @@ static class Installer
             ffBox.SetBounds(14, 352, 536, 22);
             Controls.Add(ffBox);
 
+            sepBox = new CheckBox();
+            sepBox.Text = "下载人声分离模型（可选 ≈436 MB）— vocals=1 时抗 BGM";
+            sepBox.SetBounds(14, 378, 418, 22);
+            sepBox.CheckedChanged += delegate { Sep = sepBox.Checked; };
+            Controls.Add(sepBox);
+
             var ok = new Button();
             ok.Text = "开始下载";
             ok.SetBounds(330, 412, 100, 32);
@@ -524,8 +533,9 @@ static class Installer
             if (pre != null) pre.Checked = true; else buildRadios["cpu"].Checked = true;
             if (suggestModel == ModelF16) f16.Checked = true; else q8.Checked = true;
             ffBox.Checked = suggestFf;
+            sepBox.Checked = suggestSep;
 
-            SelectedBuild = suggestBuild; SelectedModel = suggestModel; Ffmpeg = suggestFf;
+            SelectedBuild = suggestBuild; SelectedModel = suggestModel; Ffmpeg = suggestFf; Sep = suggestSep;
             Latest = false;
         }
 
@@ -546,6 +556,7 @@ static class Installer
                     if (kv.Value.Checked) SelectedBuild = kv.Key;
                 SelectedModel = f16.Checked ? ModelF16 : ModelQ8;
                 Ffmpeg = ffBox.Checked;
+                Sep = sepBox.Checked;
             }
             base.OnFormClosing(e);
         }

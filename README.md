@@ -53,11 +53,14 @@ crispasr -m <model.gguf> -f <audio> -l ja --vad -osrt -of <out>\<base> --split-o
    作为最后兜底调用。仅 PotPlayer 内使用可以不装；若还要跑本仓库的
    `tools\transcribe-ja.ps1` 批量脚本（从 mkv/mp4 抽音轨），则**必须**有 ffmpeg。
    放进 `shim.ini` 的 `ffmpeg_dir`（或同目录 `ffmpeg\`）即可注入兜底。
-4. 首次运行 `--vad` 会自动下载 silero VAD 模型到 `%USERPROFILE%\.cache\crispasr\`；
+4. **人声分离模型**（可选）— `mel-band-roformer-vocals-f16.gguf`（≈436 MB，上游只发布 f16）
+   - `https://hf-mirror.com/cstr/mel-band-roformer-vocals-GGUF`
+   - 只在 `shim.ini` 里设 `vocals=1` 时用到，见下文"人声分离（抗 BGM）"
+5. 首次运行 `--vad` 会自动下载 silero VAD 模型到 `%USERPROFILE%\.cache\crispasr\`；
    下载失败时手动放置 `ggml-silero-v6.2.0.bin`
    （可从 `https://hf-mirror.com/Freeda/ggml-silero-v6.2.0.bin` 获取）
 
-> 不想手动下载？安装器能自动拉取 1–3（见下文"安装"），全部跳过本节。
+> 不想手动下载？安装器能自动拉取 1–4（见下文"安装"），全部跳过本节。
 
 ## 安装
 
@@ -84,6 +87,7 @@ crispasr -m <model.gguf> -f <audio> -l ja --vad -osrt -of <out>\<base> --split-o
   | CrispASR CPU 版（含 legacy） | 无独显；legacy 供不支持 AVX2 的老 CPU |
   | 模型 q8_0 ≈642MB（推荐）/ f16 ≈1190MB | 精度几乎无差别，q8_0 加载更快 |
   | ffmpeg ≈115MB（可选勾选） | crispasr 内置解码失败时的兜底解码器；仅 PotPlayer 内用可不装 |
+  | 人声分离模型 ≈436MB（可选勾选） | `shim.ini` 设 `vocals=1` 时的抗 BGM 前置，见"人声分离" |
   默认**只下载已验证固定的上游版本 v0.8.36**，下载完逐个核对内置 SHA-256
   （不匹配会重试一次后报错，绝不解压安装），**不会自动跟随“最新版”**；
   确需升级时在弹框勾选“检查最新版”（此路径不校验哈希）或用 `/version:<tag>` 指定；
@@ -96,6 +100,8 @@ crispasr -m <model.gguf> -f <audio> -l ja --vad -osrt -of <out>\<base> --split-o
   CrispASR-PotPlayer-Setup.exe /quiet "X:\Path\To\PotPlayer"                :: 只装垫片
   CrispASR-PotPlayer-Setup.exe /quiet "X:\..." /download                     :: 按显卡自动选版下载组件
   ... /download /build:cuda13 /model:f16                                     :: 指定版本（可加 /only:crisp+model）
+  ... /download /sep                                                         :: 额外下载人声分离模型
+  ... /download /only:crisp,model,sep,ffmpeg                                 :: 只下其中几项
   ... /download /version:latest                                              :: 显式跟最新版（跳过哈希校验）
   ```
 
@@ -127,6 +133,7 @@ crispasr-windows-x86_64-cuda.zip        4d14ce34cbc089259e897bed369214f6f920efa3
 parakeet-tdt-0.6b-ja-q8_0.gguf          5a61e6c7d956c3c72a76fafcd798cac0c9ea66d0e29b3910cd04865a1e42cc17
 parakeet-tdt-0.6b-ja.gguf               374eb0132eebaec4df77a9631cbbeb03790be48a4a517f6cc8e8bdb38fe9a584
 parakeet-tdt-0.6b-ja-q4_k.gguf          9a9bdfec5a1f119983a00367d33fb310759d67619309f02500f649c5328ab825
+mel-band-roformer-vocals-f16.gguf       fe94b114bce12653dae4e94968d28cbab36dcdd0c783fc052c3b656218233f24
 ```
 
 两点已知例外：
@@ -147,6 +154,26 @@ PotPlayer 播放影片 → 右键菜单 / 字幕菜单 → **声音生成字幕*
 
 转录过程中 `%TEMP%\<音频名>.srt` 会渐进增长（`--flush-after 1` 的效果），可当作进度条。
 
+## 人声分离（抗 BGM，可选）
+
+番剧的 OP/ED、战斗回的配乐常压过人声。把 `shim.ini` 里的 `vocals` 设为 `1`，
+垫片会在识别前多跑一步：先用 `ffmpeg` 把音频重采样成分离模型要求的 44.1 kHz 立体声，
+再调用同一个 crispasr 的 `--separate -m mel-band-roformer-vocals-f16.gguf --stems vocals`，
+只把人声轨喂给 parakeet。批量脚本里这一步就是 `-Vocals` 参数。
+
+代价与前提（都在本机 RTX 5090 D + cuda13 构建上实测）：
+
+- 需要分离模型（≈436 MB）**和 ffmpeg**；缺任一个都不会报错，垫片会跳过分离直接识别，
+  日志里写明跳过原因（`vocals=1 but separation model not found` / `no ffmpeg`）。
+- 慢：60 秒素材不分离 2.4 s 出字幕，分离后 7.2 s（分离本身约 4.4 s，主要是模型加载）。
+  时长比例约等于"总耗时 ×3"，所以日常生肉追新番不建议常开。
+- 多占临时盘：`%TEMP%\crispasr-voc-<时间戳>\` 下多一份 44.1 kHz 立体声原轨与人声轨，
+  跑完自动删除（2 小时电影约 1.2 GB 峰值）。
+- **收益要看素材**：我在 4 段样本（60 s 纯对白、把这段叠上三个正弦音做的"配乐"干扰版、
+  另两段 30 s 片段，其中一段几乎没对白）上开关各跑一次，转写结果**逐字一致**——
+  这几段本来人声就够清楚，分离没起作用。要判断是否值得开，最快的办法是同一段素材
+  开/关各跑一次，比对两份 srt。
+
 ## shim.ini 配置项
 
 | 键 | 说明 | 默认（未写此项时自动探测） |
@@ -156,6 +183,8 @@ PotPlayer 播放影片 → 右键菜单 / 字幕菜单 → **声音生成字幕*
 | `language` | 兜底语言（ISO） | `ja` |
 | `extra` | 追加给 crispasr 的参数 | `--split-on-punct --flush-after 1` |
 | `nogpu` | `1` 强制 CPU | `0` |
+| `vocals` | `1` 转录前先用 mel-band-roformer 分离人声（抗 BGM） | `0` |
+| `separation_model` | 分离模型 GGUF 路径 | `CrispASR\models\mel-band-roformer-vocals-f16.gguf` |
 | `log` | `1` 记录到 `%TEMP%\crispasr-xxl-shim.log` | `1` |
 | `ffmpeg_dir` | 注入 crispasr 子进程 PATH 的目录 | 同目录 `ffmpeg\` 存在则自动启用 |
 
@@ -182,7 +211,7 @@ PotPlayer 播放影片 → 右键菜单 / 字幕菜单 → **声音生成字幕*
 ## 独立批量转录（不依赖 PotPlayer）
 
 `tools\transcribe-ja.ps1`：ffmpeg 抽音轨 →（可选 `-Vocals` mel-band-roformer 人声分离，
-抗 BGM）→ crispasr → 同名 `.srt`。
+抗 BGM）→ crispasr → 同名 `.srt`。`-Vocals` 与 PotPlayer 的 `vocals=1` 用的是同一份分离模型。
 
 ```powershell
 .\transcribe-ja.ps1 "D:\動画\ep01.mkv"           # 单文件

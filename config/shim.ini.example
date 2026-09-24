@@ -22,6 +22,15 @@ extra=--split-on-punct --flush-after 1
 ; 1 = 强制 CPU 运行（默认 0，用 GPU）
 nogpu=0
 
+; 1 = 转录前先用 mel-band-roformer 分离人声（抗 BGM/OP，代价：慢一些、占临时盘）。
+; 需要分离模型与 ffmpeg（ffmpeg 用于把音频重采样成分离模型要求的 44.1 kHz 立体声）。
+; 缺模型或找不到 ffmpeg 时自动跳过分离、直接转录原始音频，不会报错。
+vocals=0
+
+; 分离模型 GGUF 路径；留空则自动探测同目录 CrispASR\models\mel-band-roformer-vocals-f16.gguf。
+; 下载：https://hf-mirror.com/cstr/mel-band-roformer-vocals-GGUF （≈436 MB，仅 f16）
+separation_model=
+
 ; 1 = 在 %TEMP%\crispasr-xxl-shim.log 追加运行日志（排错用）
 log=1
 
