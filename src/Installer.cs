@@ -434,20 +434,27 @@ static class Installer
         public string BackupNote;     // set when a non-shim engine exe was preserved
     }
 
+    // one canonical terminator per line. ReplaceKey re-joins with CRLF, so without
+    // this a file whose lines still carry their old \r grows one blank line per
+    // rewrite -- which is exactly how an earlier build bloated every generated ini
+    static string NormalizeNewlines(string text)
+    {
+        var lines = text.Split('\n');
+        for (int i = 0; i < lines.Length; i++) lines[i] = lines[i].TrimEnd('\r');
+        return string.Join(Environment.NewLine, lines);
+    }
+
     static string ReplaceKey(string text, string key, string value)
     {
         string prefix = key + "=";
-        var lines = text.Split('\n');
+        var lines = NormalizeNewlines(text).Split('\n');
         bool found = false;
         for (int i = 0; i < lines.Length; i++)
         {
-            string ln = lines[i].TrimEnd('\r');
-            if (ln.TrimStart().StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
-            {
-                lines[i] = prefix + value;
-                found = true;
-                break;
-            }
+            if (!lines[i].TrimStart().StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) continue;
+            lines[i] = prefix + value;
+            found = true;
+            break;
         }
         // a shim.ini from an older build may predate the key: appending beats
         // silently doing nothing
@@ -583,7 +590,7 @@ static class Installer
         if ((c & Comp.Crisp) != 0) l.Add("· CrispASR 运行时（≈100 MB）");
         if ((c & Comp.Model) != 0) l.Add("· 日语模型 parakeet-tdt-0.6b-ja（q8_0 ≈642 MB）");
         if ((c & Comp.Sep) != 0) l.Add("· 人声分离模型（≈436 MB）");
-        if ((c & Comp.Ffmpeg) != 0) l.Add("· ffmpeg（分离需要，≈115 MB）");
+        if ((c & Comp.Ffmpeg) != 0) l.Add("· ffmpeg（分离需要，≈56 MB）");
         return string.Join("\n", l.ToArray()) + "\n";
     }
 
@@ -645,6 +652,12 @@ static class Installer
         try { text = File.ReadAllText(iniPath, Encoding.UTF8); }
         catch (Exception e) { Log("ini repair: cannot read " + iniPath + " : " + e.Message); return null; }
         var changed = new List<string>();
+
+        // an earlier build stacked one \r per rewritten key, which every editor shows
+        // as blank lines between all entries; flattening is whitespace-only, so the
+        // user's own values and comments survive untouched
+        string flat = NormalizeNewlines(text);
+        if (flat != text) { text = flat; changed.Add("多余空行"); }
 
         string crisp = IniVal(text, "crispasr");
         string wantCrisp = File.Exists(crisp) ? crisp : AutoFindCrispasr(engDir);
@@ -899,7 +912,7 @@ static class Installer
             gb2.Controls.Add(q8); gb2.Controls.Add(f16);
 
             ffBox = new CheckBox();
-            ffBox.Text = "下载 ffmpeg（可选 ≈115 MB）— crispasr 内置解码失败时的兜底解码器；仅 PotPlayer 内用可不装";
+            ffBox.Text = "下载 ffmpeg（可选 ≈56 MB）— crispasr 内置解码失败时的兜底解码器；仅 PotPlayer 内用可不装";
             ffBox.SetBounds(14, 376, 536, 22);
             Controls.Add(ffBox);
 
