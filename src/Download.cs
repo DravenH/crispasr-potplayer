@@ -584,6 +584,7 @@ static class Dl
         public Dlg()
         {
             Text = "CrispASR for PotPlayer - 下载组件";
+            Icon = Installer.AppIcon();     // taskbar/title icon: -win32icon covers the file only
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false; MinimizeBox = false;
             StartPosition = FormStartPosition.CenterScreen;

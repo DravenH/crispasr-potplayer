@@ -56,7 +56,7 @@ static class Installer
         if (!string.IsNullOrEmpty(dir) && !IsPotPlayer(dir))
         {
             if (quiet) { Log("bad potplayer dir: " + dir); return 2; }
-            MessageBox.Show("该目录下找不到 PotPlayer 主程序：\n" + dir,
+            MessageBox.Show(Owner(), "该目录下找不到 PotPlayer 主程序：\n" + dir,
                 "CrispASR for PotPlayer", MessageBoxButtons.OK, MessageBoxIcon.Error);
             dir = null;
         }
@@ -65,7 +65,7 @@ static class Installer
         if (string.IsNullOrEmpty(dir))
         {
             if (!quiet)
-                MessageBox.Show("未能定位 PotPlayer 安装目录。\n请把本程序所在路径作为参数运行：\nSetup.exe \"X:\\Path\\To\\PotPlayer\"",
+                MessageBox.Show(Owner(), "未能定位 PotPlayer 安装目录。\n请把本程序所在路径作为参数运行：\nSetup.exe \"X:\\Path\\To\\PotPlayer\"",
                     "CrispASR for PotPlayer", MessageBoxButtons.OK, MessageBoxIcon.Error);
             return 2;
         }
@@ -83,7 +83,7 @@ static class Installer
                 ? "\n目标目录受系统保护（如 Program Files），请右键本程序选择\"以管理员身份运行\"。"
                 : "";
             if (!quiet)
-                MessageBox.Show("安装失败：" + e.Message + hint,
+                MessageBox.Show(Owner(), "安装失败：" + e.Message + hint,
                     "CrispASR for PotPlayer", MessageBoxButtons.OK, MessageBoxIcon.Error);
             return 3;
         }
@@ -162,7 +162,7 @@ static class Installer
         {
             bool skipped = dlEx is Skipped;               // the picker's 跳过下载 button
             bool cancelled = !skipped && Dl.WasCancelled(dlEx);
-            MessageBox.Show((skipped ? "已跳过下载（垫片本身已安装成功）。"
+            MessageBox.Show(Owner(), (skipped ? "已跳过下载（垫片本身已安装成功）。"
                           : (cancelled ? "已取消下载（垫片本身已安装成功）：\n" : "组件下载失败（垫片本身已安装成功）：\n")
                              + dlError + "。")
                 + "\n\n可参考 README 手动下载对应组件，放进目录后重跑安装器即可（只补真正缺的那部分）。"
@@ -179,7 +179,7 @@ static class Installer
         if (res != null && res.BackupNote != null)
             tail += "\n" + res.BackupNote + "，把它改回 whisper-faster.exe 即可还原官方引擎。";
         foreach (var n in notes) tail += "\n" + n;
-        MessageBox.Show(
+        MessageBox.Show(Owner(),
             "安装完成：\n" + Path.Combine(engDir, "whisper-faster.exe") + tail
             + "\n\n重启 PotPlayer 后，在『声音生成字幕』引擎下拉选 Whisper-Faster 即可。",
             "CrispASR for PotPlayer", MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -188,7 +188,7 @@ static class Installer
 
     static bool AskYesNo(string text)
     {
-        return MessageBox.Show(text, "CrispASR for PotPlayer",
+        return MessageBox.Show(Owner(), text, "CrispASR for PotPlayer",
             MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes;
     }
 
@@ -259,9 +259,9 @@ static class Installer
             // keep re-prompting until a valid dir is picked or the user gives up
             while (true)
             {
-                if (dlg.ShowDialog() != DialogResult.OK) return null;
+                if (dlg.ShowDialog(Owner()) != DialogResult.OK) return null;
                 if (IsPotPlayer(dlg.SelectedPath)) return dlg.SelectedPath;
-                MessageBox.Show("所选目录里没有 PotPlayer 主程序，请重新选择。", "CrispASR for PotPlayer",
+                MessageBox.Show(Owner(), "所选目录里没有 PotPlayer 主程序，请重新选择。", "CrispASR for PotPlayer",
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
@@ -276,6 +276,43 @@ static class Installer
             s.Read(b, 0, b.Length);
             return b;
         }
+    }
+
+    // ============ window and taskbar icon ============
+    // -win32icon only styles the exe file in Explorer. Every window we open still has
+    // to be handed the icon itself, and a bare MessageBox takes its owner's.
+    static Icon _icon;
+    public static Icon AppIcon()
+    {
+        if (_icon == null)
+        {
+            try
+            {
+                using (var s = Assembly.GetExecutingAssembly().GetManifestResourceStream("app.ico"))
+                    if (s != null) _icon = new Icon(s);
+            }
+            catch (Exception e) { Log("icon unavailable: " + e.Message); }
+        }
+        return _icon;
+    }
+
+    static Form _owner;
+    // never shown, just handle-created: the shell draws a dialog's taskbar button from its
+    // root owner's icon (a #32770 caption has no icon of its own), and owning it also
+    // centres the dialog on screen instead of dumping it on the top-left corner
+    static IWin32Window Owner()
+    {
+        if (_owner == null || _owner.IsDisposed)
+        {
+            _owner = new Form();
+            _owner.Icon = AppIcon();
+            _owner.ShowInTaskbar = false;
+            _owner.FormBorderStyle = FormBorderStyle.FixedToolWindow;
+            _owner.StartPosition = FormStartPosition.CenterScreen;
+            _owner.Size = new Size(3, 3);
+            var handle = _owner.Handle;
+        }
+        return _owner;
     }
 
     // our shim build always embeds this log filename; .NET string literals live in
@@ -805,6 +842,7 @@ static class Installer
                        bool hasRuntime, bool hasModel)
         {
             Text = "CrispASR for PotPlayer - 选择要下载的组件";
+            Icon = AppIcon();
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false; MinimizeBox = false;
             StartPosition = FormStartPosition.CenterScreen;
