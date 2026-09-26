@@ -140,7 +140,9 @@ foreach ($file in $files) {
     if (-not $Force -and (Test-Path -LiteralPath $cacheFile)) {
         foreach ($l in [IO.File]::ReadAllLines($cacheFile, $encRaw)) {
             if ($l.Trim()) {
-                try { $o = $l | ConvertFrom-Json; $cache[(Sha1 $o.s)] = $o.t } catch { }
+                # 只认第一次出现的译文：同一句日文在不同上下文里译法会变，而旧版缓存
+                # 同一句可能写了多条（后写的是后面那批的译法），首条才对得上首次跑的输出
+                try { $o = $l | ConvertFrom-Json; $h = Sha1 $o.s; if (-not $cache.ContainsKey($h)) { $cache[$h] = $o.t } } catch { }
             }
         }
     }
@@ -200,9 +202,11 @@ foreach ($file in $files) {
                 }
                 if (-not $tr) { $tr = ''; Write-Warning ("第 {0} 行无译文，保留空行" -f ($li + 1)) }
                 $h = Sha1 $lines[$li]
-                if (-not $cache.ContainsKey($h)) { $cache[$h] = $tr }
-                $cacheStream.WriteLine((@{ s = $lines[$li]; t = $tr } | ConvertTo-Json -Compress))
-                $cacheStream.Flush()
+                if (-not $cache.ContainsKey($h)) {
+                    $cache[$h] = $tr
+                    $cacheStream.WriteLine((@{ s = $lines[$li]; t = $tr } | ConvertTo-Json -Compress))
+                    $cacheStream.Flush()
+                }
                 $ctx = @('日语: ' + $lines[$li], '中文: ' + $tr)
                 $translated++
             }
@@ -215,19 +219,20 @@ foreach ($file in $files) {
     }
 
     # ---- 写出 ----
-    $sbCn = New-Object System.Text.StringBuilder
-    $sbBi = New-Object System.Text.StringBuilder
+    # 用 List 而不是 StringBuilder：AppendLine 会把自身吐进管道，日志里会多出上万行表格
+    $cn = New-Object System.Collections.Generic.List[string]
+    $bi = New-Object System.Collections.Generic.List[string]
     foreach ($cue in $cues) {
         $zh = @($cue.src | ForEach-Object { $cache[(Sha1 $_)] })
-        $sbCn.AppendLine($cue.head); $sbCn.AppendLine($cue.time); $sbCn.AppendLine(($zh -join "`n")); $sbCn.AppendLine() | Out-Null
-        $sbBi.AppendLine($cue.head); $sbBi.AppendLine($cue.time)
-        for ($i = 0; $i -lt $cue.src.Count; $i++) { $sbBi.AppendLine($cue.src[$i]); $sbBi.AppendLine([string]$zh[$i]) }
-        $sbBi.AppendLine() | Out-Null
+        $cn.Add($cue.head); $cn.Add($cue.time); $cn.Add(($zh -join "`n")); $cn.Add('')
+        $bi.Add($cue.head); $bi.Add($cue.time)
+        for ($i = 0; $i -lt $cue.src.Count; $i++) { $bi.Add($cue.src[$i]); $bi.Add([string]$zh[$i]) }
+        $bi.Add('')
     }
-    [IO.File]::WriteAllText($outCn, $sbCn.ToString(), $encBom)
+    [IO.File]::WriteAllText($outCn, ($cn -join "`r`n") + "`r`n", $encBom)
     Write-Host ("-> " + $outCn)
     if (-not $NoBilingual) {
-        [IO.File]::WriteAllText($outBi, $sbBi.ToString(), $encBom)
+        [IO.File]::WriteAllText($outBi, ($bi -join "`r`n") + "`r`n", $encBom)
         Write-Host ("-> " + $outBi)
     }
     Write-Host ("完成：请求 {0} 次，用时 {1:N0}s" -f $reqs, $sw.Elapsed.TotalSeconds)
