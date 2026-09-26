@@ -191,8 +191,8 @@ ffmpeg 两端都核：先校验下载到的 `.gz`，gunzip 后再校验解出来
 ## 使用
 
 PotPlayer 播放影片 → 右键菜单 / 字幕菜单 → **声音生成字幕** →
-引擎选 **Whisper-Faster**（模型、语言下拉随意，垫片固定用 ini 里的模型、语言固定 `ja`，
-因为 parakeet-tdt-0.6b-ja 是日语专用模型）。
+引擎选 **Whisper-Faster**（模型下拉无效，垫片固定用 ini 里的模型；语言下拉若选了会照传，
+没选则用 ini 的 `language`，默认 `ja`——parakeet-tdt-0.6b-ja 是日语专用模型，别选别的语言）。
 
 转录过程中 `%TEMP%\<音频名>.srt` 会渐进增长（`--flush-after 1` 的效果），可当作进度条。
 
@@ -276,6 +276,60 @@ PotPlayer 播放影片 → 右键菜单 / 字幕菜单 → **声音生成字幕*
 工具链按 `-CrispDir` → `%CRISPASR_HOME%` → 脚本目录内的 `CrispASR\` 逐级探测，
 ffmpeg 另探测 PATH；也可用 `-CrispExe/-Model/-Ffmpeg` 精确指定。
 
+## 把翻译好的字幕存成文件
+
+PotPlayer 的『实时字幕翻译』是**显示期**功能：只有你已经播过去的那几行才有译文，
+剩下的还是日文。想整片存档有两条路：
+
+1. 播放器自带：字幕 → 保存字幕 → 勾上『保存字幕时同时保存翻译』，再按影片名保存
+   （`Ctrl+Shift+S`）或另存为（`Ctrl+Alt+S`）。省事，但只能存**已经显示过**的译文。
+2. 离线整片翻译（推荐）：`tools\translate-ja-srt.ps1` 直接把日文 `.srt` 整份翻成中文，
+   产出 `<影片名>.cn.srt`（PotPlayer 按影片名自动加载）与 `<影片名>.ja+cn.srt`（上下双语）。
+
+```powershell
+.\translate-ja-srt.ps1 "D:\動画\ep01.ja.srt"     # 单文件（ep.ja.srt -> ep.cn.srt）
+.\translate-ja-srt.ps1 "D:\動画"                  # 整个目录
+.\translate-ja-srt.ps1 "..." -Batch 20            # 每次请求 20 行
+.\translate-ja-srt.ps1 "..." -Model qwen3:14b      # 换本机其他模型
+```
+
+脚本走本机 ollama（`http://127.0.0.1:11434/api/chat`），提示词沿用
+[yxyxyz6/PotPlayer_ollama_Translate](https://github.com/yxyxyz6/PotPlayer_ollama_Translate)
+那套日剧规则，所以和 PotPlayer 里实时翻译的口吻一致。本机实测
+（RTX 5090 D，`huihui_ai/hy-mt1.5-abliterated`，模型常驻显存）：**1433 行日幕 77 秒**，
+12 行一批共 127 次请求。已翻过的行缓存进 `<输出名>.cn.srt.cache.jsonl`，
+中途掐断再重跑只补剩下的行，不会重复花时间。
+
+两个必须知道的坑（都是本机实测踩出来的）：
+
+- 脚本一定要走原生 `/api/chat`。ollama 的 v1 兼容口**不认**请求里的 `num_ctx`，模型仍按上限
+  131072 预留 KV 缓存；缓存装不进显存就被挤进内存（`ollama ps` 显示 `13% GPU / 87% CPU`），
+  实测每行 6~8 秒，而原生口每行 0.06 秒，差约 100 倍。（下文把 `num_ctx` 烘进模型定义后，
+  v1 口也会跟着快——但那是本机一次性设置，脚本不能指望别人做过。）
+- 缓存大小就是唯一的门槛：脚本把 `num_ctx` 默认压到 4096，不压的话这模型的缓存要 34 GB，
+  除顶配卡以外都装不进显存。
+
+如果连播放器里的**实时翻译**（第三方 `.as` 插件用的是 v1 兼容口，请求里传 `num_ctx` 无效）
+也想提速，就把缓存上限烘进模型定义——Windows 托盘版 Ollama **不读** `OLLAMA_CONTEXT_LENGTH`
+（实测设了仍按 131072 预留），但会读模型自带的 `num_ctx`，烘一次所有客户端、所有接口都受益：
+
+```powershell
+$m = 'huihui_ai/hy-mt1.5-abliterated'
+ollama show --modelfile ($m + ':latest') |                       # 取当前定义
+  ForEach-Object { $_ -replace '^FROM .*', ('FROM ' + $m) } |    # FROM 换成模型名（原样是 blobs 路径）
+  Where-Object { $_ -notmatch '^PARAMETER num_ctx ' } |          # 丢掉旧的 num_ctx，避免重复
+  Set-Content mf.txt -Encoding UTF8
+'PARAMETER num_ctx 8192' | Add-Content mf.txt -Encoding UTF8
+ollama create $m -f mf.txt                                       # 只写一个新 manifest，权重不重下
+ollama stop $m                                                   # 重载后生效
+```
+
+本机实测：烘进 8192 之后，**不带任何 `num_ctx` 的裸请求**——v1 兼容口热态 0.08~0.13 秒、
+原生口 0.09 秒（烘之前这两个数分别是 6~8 秒和 5~7 秒），冷启动 1.6 秒，
+`ollama ps` 变成 7.1 GB / 100% GPU / CONTEXT 8192。上面的 PowerShell 片段已在本机跑通
+（先用一个临时 tag 验证过再写进文档）。想回退就 `ollama pull huihui_ai/hy-mt1.5-abliterated`。
+也就是说这一段做完，连没改过的第三方 `.as` 插件都会跟着变快。
+
 ## 从源码构建
 
 ```
@@ -308,6 +362,9 @@ src\build.bat
 | [silero VAD](https://github.com/snakers4/silero-vad) | crispasr `--vad` 首次运行时自动下载的静音检测模型 | 见上游仓库声明 | 由 crispasr 自行下载 |
 | [ffmpeg](https://www.gyan.dev/ffmpeg/builds/) | 解码兜底 / 批量脚本抽音轨 | **GPL-3.0**（gyan 构建） | gyan.dev 官方构建，安装器取 [ffmpeg-static](https://github.com/eugeneware/ffmpeg-static) 重发布的同一份 b6.1.1（经 npmmirror 镜像分发） |
 | [PotPlayer](https://potplayer.daum.net/) | 宿主播放器，提供引擎槽位 | 专有免费软件 | 官方站点 |
+| [Ollama](https://github.com/ollama/ollama) | 批量翻译脚本请求的本机推理服务（本安装器**不**下载它） | **MIT** | 官方站点 |
+| [huihui_ai/hy-mt1.5-abliterated](https://ollama.com/library/huihui_ai/hy-mt1.5-abliterated) | 批量翻译默认的日→中模型（需自行 `ollama pull`） | Tencent HY Community License（`ollama show --modelfile` 读到的原文，含地区与 AUP 限制） | ollama 模型库 |
+| [PotPlayer_ollama_Translate](https://github.com/yxyxyz6/PotPlayer_ollama_Translate) | 第三方 `.as` 实时翻译插件；翻译脚本沿用了它的日剧提示词规则 | 以该仓库声明为准 | GitHub |
 
 感谢 CrispASR、NVIDIA（Parakeet 模型）、ggml/whisper.cpp 与 silero 的作者们把工具和模型开源。
 CC-BY-4.0 要求再分发模型时保留署名——你若把模型文件复制给他人，请连同本表格一并转达出处。
