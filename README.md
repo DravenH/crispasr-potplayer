@@ -330,6 +330,72 @@ ollama stop $m                                                   # 重载后生�
 （先用一个临时 tag 验证过再写进文档）。想回退就 `ollama pull huihui_ai/hy-mt1.5-abliterated`。
 也就是说这一段做完，连没改过的第三方 `.as` 插件都会跟着变快。
 
+## 可选扩展：在 PotPlayer 里直接播 115 网盘
+
+跟转录无关，纯播放向。**本节的 `.as` 是油猴脚本
+[`[115.com] Local Player`](https://greasyfork.org/zh-CN/scripts/390433-115-com-local-player)
+的配套件，两个一起用、且脚本要打一行补丁才成立**：脚本在 115 网页的文件项上加一个 `via.PotPlayer`
+按钮，取到浏览器签好的 `_1920.m3u8` 后交给本地播放器；那串直链的签名里含 UA，而**只有浏览器知道
+自己那串 UA**，所以由脚本顺手把它带过来，`.as` 再把它交给 PotPlayer 的 HTTP 栈。少任何一环都不行：
+只装脚本 → 播放器起得来但播不开，弹"在开始播放时发生了问题 / 无法播放 / 服务器已关闭或地址错误"；
+只装 `.as` → 网页里压根没有那个按钮。
+
+**根因**：115 的 CDN 直链把 **User-Agent 算进了 URL 签名** —— 链接尾部的 `se=u,ua` 就是服务端
+自报的参与签名字段。脚本递给 PotPlayer 的是浏览器签名出来的 `_1920.m3u8`，PotPlayer 却用自己
+那串 `PotPlayer/26.08.19(...)` 去请求，签名对不上 → 403。**与 cookie 无关**：本机实测不带任何
+cookie、只把 UA 换成浏览器那一串，`_1920.m3u8` 就回 200（136 KB 真播放列表）、`.ts` 回 206 且
+首字节 `0x47`；换回 PotPlayer 自己的 UA 立刻 403 `invalid signature`。
+
+UA 不能做成 `.as` 里的常量：那必须逐字节等于你浏览器发出去的那串，猜错就还是 403，别人换了浏览器
+或版本就失效。也不能靠 PotPlayer 的命令行参数 —— 把 UA 塞进 `potplayer://` 链接时浏览器会把它
+百分号编码，而 PotPlayer **不对协议参数做 URL 解码**，到播放器手里成了字面量 `%22Mozilla%2F5.0%20...`。
+`.as` 用的正是这个"缺陷"的另一面：PotPlayer 收到什么就传什么，所以脚本里 `encodeURIComponent`
+出来的值能原样到达 `.as`，由它 `HostUrlDecode` 解回原文。
+
+**装法（三步）**：
+
+1. Tampermonkey / Violentmonkey 里装上上面链接的油猴脚本（需要 115 会员，非会员不能在网页里在线
+   播放，脚本也就取不到 m3u8），然后把里面那一行交接改成：
+
+   ```js
+   // 原来：
+   var xurl = 'potplayer://' + url;
+   // 改成：
+   var xurl = 'potplayer://' + url + (url.indexOf('?') >= 0 ? '&' : '?') + '__ua='
+            + encodeURIComponent(navigator.userAgent);
+   ```
+
+2. 把本仓库 `extension\Media\PlayParse\` 下的 `MediaPlayParse - 115.as` 与**同名** `.ico`
+   （同目录、同名，PotPlayer 靠这个规则取扩展图标）一起复制到
+   `<PotPlayer>\Extension\Media\PlayParse\`。
+3. **完全退出并重开 PotPlayer** —— 脚本只在启动时扫盘编译，改完不重启不生效。
+
+`.as` 走官方扩展接口 `HostSetUrlUserAgentHTTP()`，只对 115 的链接动手；URL 里没有 `__ua` 参数时
+它**原样返回、连 UA 都不碰**，所以对没打补丁的人和所有其他片源都是零影响。
+
+本机 lab 实测（一个假 m3u8 + 请求日志，链上带 `se=u,ua&k=...` 模拟真实签名）：
+
+- 交接的 UA 是探针串 `ProbeUA/9.9.9 (Windows NT 10.0; Win64; x64) probe-with-spaces`，
+  服务端收到的 UA **逐字符相同** —— 空格、括号、分号都没在传输里被吃掉。
+- 服务端收到的请求行始终是 `/t.m3u8?se=u,ua&k=abc123`，`__ua` 参数**一次都没漏出去**，
+  即发给 115 的链和浏览器签名的逐字节一致。
+- UA 作用域是**主机/会话级**：播放列表下面的 `.ts` 分片自动继承，不需要把 m3u8 落地成本地播放列表。
+- 不带 `__ua` 时请求照旧是 `PotPlayer/26.08.19(...)`，证明"不插手"分支正确。
+- 播放器起手那次默认 UA 的探测请求必然 403，但**不影响后续播放**（真实片源已验证能播）。
+- 另有少量取列表的请求带的是系统 IE 的 UA（`...Trident/7.0; rv:11.0) like Gecko`），那是 PotPlayer
+  内部另一条不查这份映射的路径，同样不影响播放。
+
+**局限，用之前先看清：**
+
+- 那行补丁改的是第三方脚本。它一年多没更新（v2.0.2），自动更新实际不会触发；但哪天作者发了新版，
+  更新之后要把那行再补一次。
+- **只修播放。**『声音生成字幕（离线）』对网络 HLS 仍然弹"只允许文件"，那是 PotPlayer 自己的
+  门槛、与 UA 无关。要给网盘片配整片字幕，仍然走播放器外那套：
+  `ffmpeg -user_agent "<你浏览器那串 UA>" -i "<m3u8>" -ar 16000 -ac 1 out.wav` → `tools\transcribe-ja.ps1`。
+  边看边出字幕倒是可以用『声音生成字幕(实时)』，它在 115 的流上能出字 —— 但那条路走 PotPlayer
+  内置的 whisper.cpp（`Module\Whisper\whisper64.dll`，进程内调用、不起子进程），
+  **不经过本项目的垫片，因此也就不是 CrispASR 的结果**。
+
 ## 从源码构建
 
 ```
